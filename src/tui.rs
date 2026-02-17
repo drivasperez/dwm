@@ -18,6 +18,57 @@ pub enum PickerResult {
     CreateNew(Option<String>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SortMode {
+    Recency,
+    Name,
+    DiffSize,
+}
+
+impl SortMode {
+    fn next(self) -> Self {
+        match self {
+            SortMode::Recency => SortMode::Name,
+            SortMode::Name => SortMode::DiffSize,
+            SortMode::DiffSize => SortMode::Recency,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Recency => "recency",
+            SortMode::Name => "name",
+            SortMode::DiffSize => "diff size",
+        }
+    }
+}
+
+fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
+    match mode {
+        SortMode::Name => {
+            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+        SortMode::Recency => {
+            entries.sort_by(|a, b| {
+                // Most recent first; None sorts last
+                match (a.last_modified, b.last_modified) {
+                    (Some(a_t), Some(b_t)) => b_t.cmp(&a_t),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+        }
+        SortMode::DiffSize => {
+            entries.sort_by(|a, b| {
+                let a_total = a.diff_stat.insertions + a.diff_stat.deletions;
+                let b_total = b.diff_stat.insertions + b.diff_stat.deletions;
+                b_total.cmp(&a_total)
+            });
+        }
+    }
+}
+
 #[derive(PartialEq)]
 enum Mode {
     Browse,
@@ -29,15 +80,19 @@ struct App {
     selected: usize,
     mode: Mode,
     input_buf: String,
+    sort_mode: SortMode,
 }
 
 impl App {
-    fn new(entries: Vec<WorkspaceEntry>) -> Self {
+    fn new(mut entries: Vec<WorkspaceEntry>) -> Self {
+        let sort_mode = SortMode::Recency;
+        sort_entries(&mut entries, sort_mode);
         Self {
             selected: 0,
             entries,
             mode: Mode::Browse,
             input_buf: String::new(),
+            sort_mode,
         }
     }
 
@@ -216,11 +271,11 @@ fn render(frame: &mut Frame, app: &App) {
     // Render help bar at bottom
     if area.height > 3 {
         let help_text = if app.mode == Mode::InputName {
-            " Enter: create  Esc: cancel"
+            " Enter: create  Esc: cancel".to_string()
         } else if app.on_create_row() {
-            " Enter: create (auto-name)  type: name it  q: quit"
+            " Enter: create (auto-name)  type: name it  q: quit".to_string()
         } else {
-            " j/k: navigate  Enter: select  q: quit"
+            format!(" j/k: navigate  s: sort ({})  Enter: select  q: quit", app.sort_mode.label())
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray));
@@ -260,6 +315,11 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     }
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Char('s') => {
+                        app.sort_mode = app.sort_mode.next();
+                        sort_entries(&mut app.entries, app.sort_mode);
+                        app.selected = 0;
+                    }
                     KeyCode::Enter => {
                         if app.on_create_row() {
                             result = Some(PickerResult::CreateNew(None));
@@ -312,4 +372,82 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
     terminal.show_cursor()?;
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jj::DiffStat;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn make_entry(name: &str, modified_secs_ago: Option<u64>, insertions: u32, deletions: u32) -> WorkspaceEntry {
+        WorkspaceEntry {
+            name: name.to_string(),
+            path: PathBuf::from(format!("/tmp/{}", name)),
+            last_modified: modified_secs_ago.map(|s| SystemTime::now() - Duration::from_secs(s)),
+            diff_stat: DiffStat { files_changed: 1, insertions, deletions },
+            is_main: false,
+            change_id: String::new(),
+            description: String::new(),
+            bookmarks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sort_by_name_alphabetical() {
+        let mut entries = vec![
+            make_entry("cherry", None, 0, 0),
+            make_entry("Apple", None, 0, 0),
+            make_entry("banana", None, 0, 0),
+        ];
+        sort_entries(&mut entries, SortMode::Name);
+        assert_eq!(entries[0].name, "Apple");
+        assert_eq!(entries[1].name, "banana");
+        assert_eq!(entries[2].name, "cherry");
+    }
+
+    #[test]
+    fn sort_by_recency_most_recent_first() {
+        let mut entries = vec![
+            make_entry("old", Some(3600), 0, 0),
+            make_entry("new", Some(60), 0, 0),
+            make_entry("mid", Some(600), 0, 0),
+        ];
+        sort_entries(&mut entries, SortMode::Recency);
+        assert_eq!(entries[0].name, "new");
+        assert_eq!(entries[1].name, "mid");
+        assert_eq!(entries[2].name, "old");
+    }
+
+    #[test]
+    fn sort_by_recency_none_sorts_last() {
+        let mut entries = vec![
+            make_entry("unknown", None, 0, 0),
+            make_entry("recent", Some(10), 0, 0),
+        ];
+        sort_entries(&mut entries, SortMode::Recency);
+        assert_eq!(entries[0].name, "recent");
+        assert_eq!(entries[1].name, "unknown");
+    }
+
+    #[test]
+    fn sort_by_diff_size_largest_first() {
+        let mut entries = vec![
+            make_entry("small", None, 1, 2),
+            make_entry("large", None, 50, 30),
+            make_entry("medium", None, 10, 5),
+        ];
+        sort_entries(&mut entries, SortMode::DiffSize);
+        assert_eq!(entries[0].name, "large");
+        assert_eq!(entries[1].name, "medium");
+        assert_eq!(entries[2].name, "small");
+    }
+
+    #[test]
+    fn sort_mode_cycles() {
+        assert_eq!(SortMode::Recency.next(), SortMode::Name);
+        assert_eq!(SortMode::Name.next(), SortMode::DiffSize);
+        assert_eq!(SortMode::DiffSize.next(), SortMode::Recency);
+    }
 }
