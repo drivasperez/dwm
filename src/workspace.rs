@@ -31,7 +31,7 @@ fn ensure_repo_dir(repo_name: &str, main_repo_root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn new_workspace(name: Option<String>) -> Result<()> {
+pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
     let repo_name = jj::repo_name()?;
     let root = jj::root()?;
     let dir = ensure_repo_dir(&repo_name, &root)?;
@@ -47,7 +47,7 @@ pub fn new_workspace(name: Option<String>) -> Result<()> {
     }
 
     eprintln!("creating workspace '{}'...", ws_name);
-    jj::workspace_add(&ws_path, &ws_name)?;
+    jj::workspace_add(&ws_path, &ws_name, at)?;
     eprintln!("workspace '{}' created at {}", ws_name, ws_path.display());
 
     // stdout: path for shell wrapper to cd into

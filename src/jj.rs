@@ -153,15 +153,25 @@ pub fn latest_description(dir: &Path, workspace_name: &str) -> String {
     }
 }
 
-pub fn workspace_add(path: &Path, name: &str) -> Result<()> {
+pub fn workspace_add(path: &Path, name: &str, revision: Option<&str>) -> Result<()> {
     let path_str = path.to_string_lossy();
-    run_jj(&["workspace", "add", "--name", name, &path_str])?;
+    let mut args = vec!["workspace", "add", "--name", name, &path_str];
+    if let Some(rev) = revision {
+        args.push("--revision");
+        args.push(rev);
+    }
+    run_jj(&args)?;
     Ok(())
 }
 
-pub fn workspace_add_from(repo_dir: &Path, ws_path: &Path, name: &str) -> Result<()> {
+pub fn workspace_add_from(repo_dir: &Path, ws_path: &Path, name: &str, revision: Option<&str>) -> Result<()> {
     let path_str = ws_path.to_string_lossy();
-    run_jj_in(repo_dir, &["workspace", "add", "--name", name, &path_str])?;
+    let mut args = vec!["workspace", "add", "--name", name, &path_str];
+    if let Some(rev) = revision {
+        args.push("--revision");
+        args.push(rev);
+    }
+    run_jj_in(repo_dir, &args)?;
     Ok(())
 }
 

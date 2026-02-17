@@ -13,6 +13,9 @@ pub enum Commands {
     New {
         /// Workspace name (auto-generated if omitted)
         name: Option<String>,
+        /// Start from a specific revision instead of @
+        #[arg(long)]
+        at: Option<String>,
     },
     /// List workspaces and pick one interactively
     List,

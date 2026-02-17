@@ -2,7 +2,7 @@
 
 ## Quick wins
 
-- [ ] `jjws new --at <revset>` — Create a workspace starting from a specific revision instead of always `@`. Pass `--revision` through to `jj workspace add`.
+- [x] `jjws new --at <revset>` — Create a workspace starting from a specific revision instead of always `@`. Pass `--revision` through to `jj workspace add`.
 - [ ] Inline delete from the picker — Press `d` on a highlighted workspace in the TUI to delete it (with confirmation). Avoids quit-type-relist cycle.
 - [ ] Filter/search in the picker — Press `/` to fuzzy-filter over workspace names, descriptions, and bookmarks.
 - [ ] Sort options — Cycle sort modes (name, recency, diff size) with a keypress like `s`. Default to most-recently-modified-first.

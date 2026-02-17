@@ -15,12 +15,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::New { name } => workspace::new_workspace(name),
+        Commands::New { name, at } => workspace::new_workspace(name, at.as_deref()),
         Commands::List => {
             let entries = workspace::list_workspace_entries()?;
             match tui::run_picker(entries)? {
                 Some(tui::PickerResult::Selected(path)) => println!("{}", path),
-                Some(tui::PickerResult::CreateNew(name)) => workspace::new_workspace(name)?,
+                Some(tui::PickerResult::CreateNew(name)) => workspace::new_workspace(name, None)?,
                 None => {}
             }
             Ok(())
