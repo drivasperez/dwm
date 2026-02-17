@@ -447,6 +447,264 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
     Ok(result)
 }
 
+// ── Multi-repo picker (--all mode) ──────────────────────────────
+
+struct MultiRepoApp {
+    entries: Vec<WorkspaceEntry>,
+    selected: usize,
+    sort_mode: SortMode,
+    filter_buf: String,
+    filtered_indices: Vec<usize>,
+    filter_mode: bool,
+}
+
+impl MultiRepoApp {
+    fn new(mut entries: Vec<WorkspaceEntry>) -> Self {
+        let sort_mode = SortMode::Recency;
+        sort_entries(&mut entries, sort_mode);
+        let filtered_indices: Vec<usize> = (0..entries.len()).collect();
+        Self {
+            selected: 0,
+            entries,
+            sort_mode,
+            filter_buf: String::new(),
+            filtered_indices,
+            filter_mode: false,
+        }
+    }
+
+    fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
+        self.filtered_indices.iter().map(|&i| &self.entries[i]).collect()
+    }
+
+    fn total_rows(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    fn next(&mut self) {
+        let total = self.total_rows();
+        if total > 0 {
+            self.selected = (self.selected + 1) % total;
+        }
+    }
+
+    fn previous(&mut self) {
+        let total = self.total_rows();
+        if total > 0 {
+            self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
+        }
+    }
+
+    fn recompute_filter(&mut self) {
+        if self.filter_buf.is_empty() {
+            self.filtered_indices = (0..self.entries.len()).collect();
+        } else {
+            self.filtered_indices = self.entries.iter().enumerate()
+                .filter(|(_, e)| matches_filter(e, &self.filter_buf))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        if self.selected >= self.total_rows() {
+            self.selected = self.total_rows().saturating_sub(1);
+        }
+    }
+}
+
+fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
+    let area = frame.area();
+
+    let header_cells = ["Repo", "Name", "Change", "Description", "Bookmarks", "Modified", "Changes"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
+    let header = Row::new(header_cells)
+        .style(Style::default().bg(Color::DarkGray))
+        .height(1);
+
+    let visible = app.visible_entries();
+    let rows: Vec<Row> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let repo_text = entry.repo_name.as_deref().unwrap_or("").to_string();
+
+            let name_text = if entry.is_main {
+                format!("{} (main)", entry.name)
+            } else if entry.is_stale {
+                format!("{} [stale]", entry.name)
+            } else {
+                entry.name.clone()
+            };
+
+            let change_text = entry.change_id.clone();
+            let desc_text = entry.description.lines().next().unwrap_or("").to_string();
+            let bookmarks_text = entry.bookmarks.join(", ");
+            let time_text = format_time_ago(entry.last_modified);
+
+            let stat = &entry.diff_stat;
+            let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+                "clean".to_string()
+            } else {
+                let mut parts = Vec::new();
+                if stat.insertions > 0 { parts.push(format!("+{}", stat.insertions)); }
+                if stat.deletions > 0 { parts.push(format!("-{}", stat.deletions)); }
+                if parts.is_empty() { format!("{} files", stat.files_changed) } else { parts.join(" ") }
+            };
+
+            let style = if i == app.selected {
+                Style::default().bg(Color::Rgb(40, 40, 60))
+            } else {
+                Style::default()
+            };
+
+            let dim = entry.is_stale;
+            let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
+            let change_fg = if dim { Color::DarkGray } else { Color::Magenta };
+            let desc_fg = if dim { Color::DarkGray } else { Color::White };
+            let bookmark_fg = if dim { Color::DarkGray } else { Color::Blue };
+            let time_fg = if dim { Color::DarkGray } else { Color::Yellow };
+            let changes_fg = if dim {
+                Color::DarkGray
+            } else if stat.deletions > stat.insertions {
+                Color::Red
+            } else if stat.insertions > 0 {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+
+            Row::new(vec![
+                Cell::from(repo_text).style(Style::default().fg(Color::Green)),
+                Cell::from(name_text).style(Style::default().fg(name_fg)),
+                Cell::from(change_text).style(Style::default().fg(change_fg)),
+                Cell::from(desc_text).style(Style::default().fg(desc_fg)),
+                Cell::from(bookmarks_text).style(Style::default().fg(bookmark_fg)),
+                Cell::from(time_text).style(Style::default().fg(time_fg)),
+                Cell::from(changes_text).style(Style::default().fg(changes_fg)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(10),
+        Constraint::Percentage(12),
+        Constraint::Percentage(8),
+        Constraint::Percentage(30),
+        Constraint::Percentage(12),
+        Constraint::Percentage(13),
+        Constraint::Percentage(15),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" jjws workspaces (all repos) ")
+                .title_alignment(Alignment::Center),
+        )
+        .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
+
+    frame.render_widget(table, area);
+
+    if area.height > 3 {
+        let help_text = if app.filter_mode {
+            format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf)
+        } else {
+            let filter_info = if !app.filter_buf.is_empty() {
+                format!("  [filter: \"{}\"]", app.filter_buf)
+            } else {
+                String::new()
+            };
+            format!(" j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
+        };
+        let help = Paragraph::new(help_text)
+            .style(Style::default().fg(Color::DarkGray));
+        let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        frame.render_widget(help, help_area);
+    }
+}
+
+pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
+    if entries.is_empty() {
+        eprintln!("no workspaces found");
+        return Ok(None);
+    }
+
+    enable_raw_mode()?;
+    let mut stderr = io::stderr();
+    crossterm::execute!(stderr, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = MultiRepoApp::new(entries);
+    let result;
+
+    loop {
+        terminal.draw(|f| render_multi_repo(f, &app))?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if app.filter_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.filter_buf.clear();
+                        app.recompute_filter();
+                        app.filter_mode = false;
+                    }
+                    KeyCode::Enter => {
+                        app.filter_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        app.filter_buf.pop();
+                        app.recompute_filter();
+                    }
+                    KeyCode::Char(c) => {
+                        app.filter_buf.push(c);
+                        app.recompute_filter();
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        result = None;
+                        break;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => app.next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Char('s') => {
+                        app.sort_mode = app.sort_mode.next();
+                        sort_entries(&mut app.entries, app.sort_mode);
+                        app.recompute_filter();
+                        app.selected = 0;
+                    }
+                    KeyCode::Char('/') => {
+                        app.filter_mode = true;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&idx) = app.filtered_indices.get(app.selected) {
+                            let path = app.entries[idx].path.to_string_lossy().to_string();
+                            result = Some(PickerResult::Selected(path));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +723,7 @@ mod tests {
             description: String::new(),
             bookmarks: Vec::new(),
             is_stale: false,
+            repo_name: None,
         }
     }
 
@@ -536,6 +795,7 @@ mod tests {
             description: description.to_string(),
             bookmarks: bookmarks.into_iter().map(String::from).collect(),
             is_stale: false,
+            repo_name: None,
         }
     }
 

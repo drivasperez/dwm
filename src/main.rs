@@ -18,7 +18,14 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::New { name, at } => workspace::new_workspace(name, at.as_deref()),
-        Commands::List => {
+        Commands::List { all } => {
+            if all {
+                let entries = workspace::list_all_workspace_entries()?;
+                if let Some(tui::PickerResult::Selected(path)) = tui::run_picker_multi_repo(entries)? {
+                    println!("{}", path);
+                }
+                return Ok(());
+            }
             loop {
                 let entries = workspace::list_workspace_entries()?;
                 match tui::run_picker(entries)? {

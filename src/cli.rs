@@ -18,7 +18,11 @@ pub enum Commands {
         at: Option<String>,
     },
     /// List workspaces and pick one interactively
-    List,
+    List {
+        /// Show workspaces across all repos
+        #[arg(long)]
+        all: bool,
+    },
     /// Print a non-interactive workspace summary
     Status,
     /// Rename a workspace

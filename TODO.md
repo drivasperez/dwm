@@ -9,10 +9,10 @@
 
 ## Medium effort, high value
 
-- [ ] `jjws status` — Non-interactive, `git branch -v`-style summary printed to stderr. Useful for scripting and shell prompts. Could also be a `--no-tui` flag on `list`.
-- [ ] Stale workspace detection — Flag workspaces merged into trunk or unchanged for >30 days. Show a dim "stale" marker in the TUI, or a `jjws gc`/`jjws prune` command for bulk cleanup.
-- [ ] `jjws rename <old> <new>` — Rename a workspace (`jj workspace forget` + `jj workspace add --name` + move directory).
-- [ ] Multi-repo dashboard — `jjws list --all` to show workspaces across all repos under `~/.jjws/`, grouped by repo name.
+- [x] `jjws status` — Non-interactive, `git branch -v`-style summary printed to stderr. Useful for scripting and shell prompts. Could also be a `--no-tui` flag on `list`.
+- [x] Stale workspace detection — Flag workspaces merged into trunk or unchanged for >30 days. Show a dim "stale" marker in the TUI, or a `jjws gc`/`jjws prune` command for bulk cleanup.
+- [x] `jjws rename <old> <new>` — Rename a workspace (`jj workspace forget` + `jj workspace add --name` + move directory).
+- [x] Multi-repo dashboard — `jjws list --all` to show workspaces across all repos under `~/.jjws/`, grouped by repo name.
 
 ## Exciting / ambitious
 
