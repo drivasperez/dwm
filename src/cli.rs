@@ -25,12 +25,17 @@ pub enum Commands {
     },
     /// Print a non-interactive workspace summary
     Status,
+    /// Switch to a workspace by name
+    Switch {
+        /// Workspace name
+        name: String,
+    },
     /// Rename a workspace
     Rename {
-        /// Current workspace name
-        old_name: String,
-        /// New workspace name
-        new_name: String,
+        /// New name (or old name if two args given)
+        name: String,
+        /// New name when renaming a different workspace
+        new_name: Option<String>,
     },
     /// Delete a workspace (by name, or the current one if omitted)
     Delete {

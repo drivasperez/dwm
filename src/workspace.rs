@@ -191,7 +191,7 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
     }
 }
 
-pub fn rename_workspace(old_name: String, new_name: String) -> Result<()> {
+pub fn switch_workspace(name: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
 
@@ -215,10 +215,91 @@ pub fn rename_workspace(old_name: String, new_name: String) -> Result<()> {
         cwd,
         dwm_base,
     };
-    if let Some(redirect) = rename_workspace_inner(&deps, &old_name, &new_name)? {
+    let path = switch_workspace_inner(&deps, name)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
+    let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
+        let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+        relative
+            .components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        deps.backend.repo_name_from(&deps.cwd)?
+    };
+
+    let main_ws_name = deps.backend.main_workspace_name();
+    if name == main_ws_name {
+        return main_repo_path(&deps.dwm_base, &repo_name_str);
+    }
+
+    let ws_path = deps.dwm_base.join(&repo_name_str).join(name);
+    if !ws_path.exists() {
+        bail!("workspace '{}' not found at {}", name, ws_path.display());
+    }
+
+    Ok(ws_path)
+}
+
+pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let dwm_base = dwm_base_dir()?;
+
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        let repo_name_str = relative
+            .components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let rd = repo_dir(&dwm_base, &repo_name_str);
+        vcs::detect_from_dwm_dir(&rd)?
+    } else {
+        vcs::detect(&cwd)?
+    };
+
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
+
+    let (old, new) = match new_name {
+        Some(new) => (name, new),
+        None => {
+            // Infer old name from cwd
+            let old = infer_workspace_name_from_cwd(&deps)?;
+            (old, name)
+        }
+    };
+
+    if let Some(redirect) = rename_workspace_inner(&deps, &old, &new)? {
         println!("{}", redirect.display());
     }
     Ok(())
+}
+
+fn infer_workspace_name_from_cwd(deps: &WorkspaceDeps) -> Result<String> {
+    if !deps.cwd.starts_with(&deps.dwm_base) {
+        bail!(
+            "not inside a dwm workspace (current dir must be under {})",
+            deps.dwm_base.display()
+        );
+    }
+    let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+    let components: Vec<&std::ffi::OsStr> = relative.components().map(|c| c.as_os_str()).collect();
+    if components.len() < 2 {
+        bail!("could not determine workspace name from current directory");
+    }
+    Ok(components[1].to_string_lossy().to_string())
 }
 
 /// Returns the path the shell should cd to if cwd was inside the renamed workspace.
@@ -1246,6 +1327,130 @@ mod tests {
         assert!(err.to_string().contains("cannot rename"), "error: {}", err);
     }
 
+    // ── switch_workspace_inner tests ──────────────────────────────
+
+    #[test]
+    fn switch_workspace_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+
+        // Create a workspace dir
+        let ws_dir = dwm_base.join("myrepo/feat-x");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let path = switch_workspace_inner(&deps, "feat-x").unwrap();
+        assert_eq!(path, ws_dir);
+    }
+
+    #[test]
+    fn switch_workspace_to_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+            dwm_base,
+        };
+
+        // "default" is the mock's main_workspace_name
+        let path = switch_workspace_inner(&deps, "default").unwrap();
+        assert_eq!(path, main_repo);
+    }
+
+    #[test]
+    fn switch_workspace_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let err = switch_workspace_inner(&deps, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    // ── rename with cwd inference tests ─────────────────────────────
+
+    #[test]
+    fn rename_infers_from_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+
+        let ws_dir = dwm_base.join("myrepo/old-name");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let (mock, calls) = MockBackend::new(main_repo, vec![]);
+        // cwd is inside the workspace
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: ws_dir.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Infer old name from cwd
+        let old = infer_workspace_name_from_cwd(&deps).unwrap();
+        assert_eq!(old, "old-name");
+
+        // Now do the rename
+        let redirect = rename_workspace_inner(&deps, &old, "new-name").unwrap();
+        let redirect = redirect.expect("should redirect when cwd is inside workspace");
+        assert_eq!(redirect, dwm_base.join("myrepo/new-name"));
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::WorkspaceRename { old_name, new_name } => {
+                assert_eq!(old_name, "old-name");
+                assert_eq!(new_name, "new-name");
+            }
+            other => panic!("expected WorkspaceRename, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rename_refuses_outside_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        // cwd is outside dwm
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let err = infer_workspace_name_from_cwd(&deps).unwrap_err();
+        assert!(
+            err.to_string().contains("not inside a dwm workspace"),
+            "error: {}",
+            err
+        );
+    }
+
     // ── list_all_workspace_entries_inner tests ─────────────────────
 
     #[test]
@@ -2036,6 +2241,89 @@ mod tests {
         let entries = list_workspace_entries_inner(&deps3).unwrap();
         assert!(entries.iter().any(|e| e.name == "renamed-ws"));
         assert!(!entries.iter().any(|e| e.name == "my-ws"));
+    }
+
+    #[test]
+    fn e2e_git_switch_workspace() {
+        assert!(git_available(), "git must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = tmp.path().join("dwm");
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create a workspace
+        new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
+        let ws_dir = dwm_base.join("myrepo/switch-target");
+
+        // Switch to it
+        let backend2 = crate::git::GitBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
+        assert_eq!(path, ws_dir);
+
+        // Switch to main
+        let backend3 = crate::git::GitBackend;
+        let deps3 = WorkspaceDeps {
+            backend: Box::new(backend3),
+            cwd: main_repo.clone(),
+            dwm_base,
+        };
+        let path = switch_workspace_inner(&deps3, "main-worktree").unwrap();
+        assert_eq!(path, main_repo);
+    }
+
+    #[test]
+    fn e2e_jj_switch_workspace() {
+        assert!(jj_available(), "jj must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_jj_repo(&repo_path);
+
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+
+        let backend = crate::jj::JjBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create a workspace
+        new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
+        let ws_dir = dwm_base.join("myrepo/switch-target");
+
+        // Switch to it
+        let backend2 = crate::jj::JjBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
+        assert_eq!(path, ws_dir);
+
+        // Switch to main (default)
+        let backend3 = crate::jj::JjBackend;
+        let deps3 = WorkspaceDeps {
+            backend: Box::new(backend3),
+            cwd: main_repo.clone(),
+            dwm_base,
+        };
+        let path = switch_workspace_inner(&deps3, "default").unwrap();
+        assert_eq!(path, main_repo);
     }
 
     #[test]
