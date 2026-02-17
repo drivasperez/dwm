@@ -2,6 +2,9 @@
 name = "dwm"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/drivasperez/dwm"
+description = "A git/jj worktree manager"
+homepage = "dwm.drpz.xyz"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -13,3 +16,8 @@ rand = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
