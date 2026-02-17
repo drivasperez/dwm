@@ -465,7 +465,7 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jj::DiffStat;
+    use crate::vcs::DiffStat;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 

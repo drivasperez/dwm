@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
+
 fn run_jj(args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
         .args(args)
@@ -47,52 +49,12 @@ pub fn repo_name() -> Result<String> {
     Ok(name)
 }
 
-pub fn repo_name_from(dir: &Path) -> Result<String> {
-    let root = root_from(dir)?;
-    let name = root
-        .file_name()
-        .context("repo root has no directory name")?
-        .to_string_lossy()
-        .to_string();
-    Ok(name)
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct WorkspaceInfo {
-    pub change_id: String,
-    pub description: String,
-    pub bookmarks: Vec<String>,
-}
-
-pub fn workspace_list() -> Result<Vec<(String, WorkspaceInfo)>> {
-    let out = run_jj(&[
-        "workspace",
-        "list",
-        "-T",
-        concat!(
-            r#"name ++ "\0" ++ self.working_copy_commit().change_id().shortest(8) ++ "\0""#,
-            r#" ++ self.working_copy_commit().description() ++ "\0""#,
-            r#" ++ self.working_copy_commit().bookmarks().map(|b| b.name()).join(",") ++ "\0\n""#,
-        ),
-    ])?;
-    parse_workspace_info(&out)
-}
-
-pub fn workspace_list_from(dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>> {
-    let out = run_jj_in(
-        dir,
-        &[
-            "workspace",
-            "list",
-            "-T",
-            concat!(
-                r#"name ++ "\0" ++ self.working_copy_commit().change_id().shortest(8) ++ "\0""#,
-                r#" ++ self.working_copy_commit().description() ++ "\0""#,
-                r#" ++ self.working_copy_commit().bookmarks().map(|b| b.name()).join(",") ++ "\0\n""#,
-            ),
-        ],
-    )?;
-    parse_workspace_info(&out)
+fn workspace_list_template() -> &'static str {
+    concat!(
+        r#"name ++ "\0" ++ self.working_copy_commit().change_id().shortest(8) ++ "\0""#,
+        r#" ++ self.working_copy_commit().description() ++ "\0""#,
+        r#" ++ self.working_copy_commit().bookmarks().map(|b| b.name()).join(",") ++ "\0\n""#,
+    )
 }
 
 fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
@@ -125,8 +87,7 @@ fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
     Ok(results)
 }
 
-/// Find the latest ancestor of `workspace_name@` that has a non-empty description.
-pub fn latest_description(dir: &Path, workspace_name: &str) -> String {
+fn latest_description(dir: &Path, workspace_name: &str) -> String {
     let revset = format!(
         r#"latest(ancestors({name}@) & description(glob:"?*"))"#,
         name = workspace_name
@@ -153,144 +114,87 @@ pub fn latest_description(dir: &Path, workspace_name: &str) -> String {
     }
 }
 
-pub fn workspace_add(path: &Path, name: &str, revision: Option<&str>) -> Result<()> {
-    let path_str = path.to_string_lossy();
-    let mut args = vec!["workspace", "add", "--name", name, &path_str];
-    if let Some(rev) = revision {
-        args.push("--revision");
-        args.push(rev);
-    }
-    run_jj(&args)?;
-    Ok(())
-}
-
-pub fn workspace_add_from(repo_dir: &Path, ws_path: &Path, name: &str, revision: Option<&str>) -> Result<()> {
-    let path_str = ws_path.to_string_lossy();
-    let mut args = vec!["workspace", "add", "--name", name, &path_str];
-    if let Some(rev) = revision {
-        args.push("--revision");
-        args.push(rev);
-    }
-    run_jj_in(repo_dir, &args)?;
-    Ok(())
-}
-
-pub fn workspace_forget(name: &str) -> Result<()> {
-    run_jj(&["workspace", "forget", name])?;
-    Ok(())
-}
-
-pub fn workspace_forget_from(dir: &Path, name: &str) -> Result<()> {
-    run_jj_in(dir, &["workspace", "forget", name])?;
-    Ok(())
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct DiffStat {
-    pub files_changed: u32,
-    pub insertions: u32,
-    pub deletions: u32,
-}
-
-pub fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
+fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
     let out = run_jj_in(dir, &["diff", "--stat", "--from", from, "--to", to]);
     match out {
-        Ok(text) => parse_diff_stat(&text),
+        Ok(text) => vcs::parse_diff_stat(&text),
         Err(_) => Ok(DiffStat::default()),
     }
 }
 
-fn parse_diff_stat(output: &str) -> Result<DiffStat> {
-    // The last line looks like: "3 files changed, 10 insertions(+), 5 deletions(-)"
-    // or just "0 files changed"
-    if let Some(last_line) = output.lines().last()
-        && let Some(stat) = parse_diff_stat_line(last_line)
-    {
-        return Ok(stat);
-    }
-    Ok(DiffStat::default())
-}
+pub struct JjBackend;
 
-fn parse_diff_stat_line(line: &str) -> Option<DiffStat> {
-    let line = line.trim();
-    if !line.contains("file") {
-        return None;
+impl VcsBackend for JjBackend {
+    fn root_from(&self, dir: &Path) -> Result<PathBuf> {
+        root_from(dir)
     }
-    let mut stat = DiffStat::default();
 
-    for part in line.split(',') {
-        let part = part.trim();
-        let tokens: Vec<&str> = part.split_whitespace().collect();
-        if tokens.len() >= 2
-            && let Ok(n) = tokens[0].parse::<u32>()
-        {
-            if tokens[1].starts_with("file") {
-                stat.files_changed = n;
-            } else if tokens[1].starts_with("insertion") {
-                stat.insertions = n;
-            } else if tokens[1].starts_with("deletion") {
-                stat.deletions = n;
-            }
+    fn repo_name_from(&self, dir: &Path) -> Result<String> {
+        let root = self.root_from(dir)?;
+        let name = root
+            .file_name()
+            .context("repo root has no directory name")?
+            .to_string_lossy()
+            .to_string();
+        Ok(name)
+    }
+
+    fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>> {
+        let out = run_jj_in(repo_dir, &["workspace", "list", "-T", workspace_list_template()])?;
+        parse_workspace_info(&out)
+    }
+
+    fn workspace_add(&self, repo_dir: &Path, ws_path: &Path, name: &str, at: Option<&str>) -> Result<()> {
+        let path_str = ws_path.to_string_lossy();
+        let mut args = vec!["workspace", "add", "--name", name, &path_str];
+        if let Some(rev) = at {
+            args.push("--revision");
+            args.push(rev);
         }
+        run_jj_in(repo_dir, &args)?;
+        Ok(())
     }
 
-    Some(stat)
+    fn workspace_remove(&self, repo_dir: &Path, name: &str, _ws_path: &Path) -> Result<()> {
+        run_jj_in(repo_dir, &["workspace", "forget", name])?;
+        Ok(())
+    }
+
+    fn diff_stat_vs_trunk(
+        &self,
+        repo_dir: &Path,
+        _worktree_dir: &Path,
+        ws_name: &str,
+    ) -> Result<DiffStat> {
+        let to = if ws_name == "default" {
+            "@".to_string()
+        } else {
+            format!("{}@", ws_name)
+        };
+        diff_stat(repo_dir, "trunk()", &to)
+    }
+
+    fn latest_description(
+        &self,
+        repo_dir: &Path,
+        _worktree_dir: &Path,
+        ws_name: &str,
+    ) -> String {
+        latest_description(repo_dir, ws_name)
+    }
+
+    fn vcs_name(&self) -> &'static str {
+        "jj"
+    }
+
+    fn main_workspace_name(&self) -> &'static str {
+        "default"
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_full_stat_line() {
-        let line = "3 files changed, 10 insertions(+), 5 deletions(-)";
-        let stat = parse_diff_stat_line(line).unwrap();
-        assert_eq!(stat.files_changed, 3);
-        assert_eq!(stat.insertions, 10);
-        assert_eq!(stat.deletions, 5);
-    }
-
-    #[test]
-    fn parse_insertions_only() {
-        let line = "1 file changed, 42 insertions(+)";
-        let stat = parse_diff_stat_line(line).unwrap();
-        assert_eq!(stat.files_changed, 1);
-        assert_eq!(stat.insertions, 42);
-        assert_eq!(stat.deletions, 0);
-    }
-
-    #[test]
-    fn parse_deletions_only() {
-        let line = "2 files changed, 7 deletions(-)";
-        let stat = parse_diff_stat_line(line).unwrap();
-        assert_eq!(stat.files_changed, 2);
-        assert_eq!(stat.insertions, 0);
-        assert_eq!(stat.deletions, 7);
-    }
-
-    #[test]
-    fn parse_zero_changes() {
-        let line = "0 files changed";
-        let stat = parse_diff_stat_line(line).unwrap();
-        assert_eq!(stat.files_changed, 0);
-        assert_eq!(stat.insertions, 0);
-        assert_eq!(stat.deletions, 0);
-    }
-
-    #[test]
-    fn parse_non_stat_line_returns_none() {
-        let line = " src/main.rs | 5 ++---";
-        assert!(parse_diff_stat_line(line).is_none());
-    }
-
-    #[test]
-    fn parse_diff_stat_multiline() {
-        let output = " src/main.rs | 5 ++---\n src/lib.rs  | 3 +++\n 2 files changed, 5 insertions(+), 3 deletions(-)";
-        let stat = parse_diff_stat(output).unwrap();
-        assert_eq!(stat.files_changed, 2);
-        assert_eq!(stat.insertions, 5);
-        assert_eq!(stat.deletions, 3);
-    }
 
     #[test]
     fn parse_workspace_info_basic() {

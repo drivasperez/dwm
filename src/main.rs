@@ -1,9 +1,11 @@
 mod cli;
+mod git;
 #[allow(dead_code)]
 mod jj;
 mod names;
 mod shell;
 mod tui;
+mod vcs;
 mod workspace;
 
 use anyhow::Result;
