@@ -172,6 +172,8 @@ fn render(frame: &mut Frame, app: &App) {
         .map(|(i, entry)| {
             let name_text = if entry.is_main {
                 format!("{} (main)", entry.name)
+            } else if entry.is_stale {
+                format!("{} [stale]", entry.name)
             } else {
                 entry.name.clone()
             };
@@ -212,19 +214,30 @@ fn render(frame: &mut Frame, app: &App) {
                 Style::default()
             };
 
+            // Use dim styling for stale workspaces
+            let dim = entry.is_stale;
+            let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
+            let change_fg = if dim { Color::DarkGray } else { Color::Magenta };
+            let desc_fg = if dim { Color::DarkGray } else { Color::White };
+            let bookmark_fg = if dim { Color::DarkGray } else { Color::Blue };
+            let time_fg = if dim { Color::DarkGray } else { Color::Yellow };
+            let changes_fg = if dim {
+                Color::DarkGray
+            } else if stat.deletions > stat.insertions {
+                Color::Red
+            } else if stat.insertions > 0 {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+
             Row::new(vec![
-                Cell::from(name_text).style(Style::default().fg(Color::Cyan)),
-                Cell::from(change_text).style(Style::default().fg(Color::Magenta)),
-                Cell::from(desc_text).style(Style::default().fg(Color::White)),
-                Cell::from(bookmarks_text).style(Style::default().fg(Color::Blue)),
-                Cell::from(time_text).style(Style::default().fg(Color::Yellow)),
-                Cell::from(changes_text).style(Style::default().fg(if stat.deletions > stat.insertions {
-                    Color::Red
-                } else if stat.insertions > 0 {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                })),
+                Cell::from(name_text).style(Style::default().fg(name_fg)),
+                Cell::from(change_text).style(Style::default().fg(change_fg)),
+                Cell::from(desc_text).style(Style::default().fg(desc_fg)),
+                Cell::from(bookmarks_text).style(Style::default().fg(bookmark_fg)),
+                Cell::from(time_text).style(Style::default().fg(time_fg)),
+                Cell::from(changes_text).style(Style::default().fg(changes_fg)),
             ])
             .style(style)
         })
@@ -451,6 +464,7 @@ mod tests {
             change_id: String::new(),
             description: String::new(),
             bookmarks: Vec::new(),
+            is_stale: false,
         }
     }
 
@@ -521,6 +535,7 @@ mod tests {
             change_id: String::new(),
             description: description.to_string(),
             bookmarks: bookmarks.into_iter().map(String::from).collect(),
+            is_stale: false,
         }
     }
 

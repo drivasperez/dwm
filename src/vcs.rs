@@ -43,6 +43,7 @@ pub trait VcsBackend {
         worktree_dir: &Path,
         ws_name: &str,
     ) -> String;
+    fn is_merged_into_trunk(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> bool;
     fn vcs_name(&self) -> &'static str;
     fn main_workspace_name(&self) -> &'static str;
 }

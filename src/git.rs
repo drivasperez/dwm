@@ -174,6 +174,12 @@ impl VcsBackend for GitBackend {
             .unwrap_or_default()
     }
 
+    fn is_merged_into_trunk(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> bool {
+        let trunk = detect_trunk(worktree_dir);
+        // Check if HEAD is an ancestor of trunk (i.e., fully merged)
+        run_git_in(worktree_dir, &["merge-base", "--is-ancestor", "HEAD", &trunk]).is_ok()
+    }
+
     fn vcs_name(&self) -> &'static str {
         "git"
     }

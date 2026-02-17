@@ -183,6 +183,18 @@ impl VcsBackend for JjBackend {
         latest_description(repo_dir, ws_name)
     }
 
+    fn is_merged_into_trunk(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> bool {
+        let revset = if ws_name == "default" {
+            "trunk()..@".to_string()
+        } else {
+            format!("trunk()..{}@", ws_name)
+        };
+        match run_jj_in(repo_dir, &["log", "-r", &revset, "--no-graph", "-T", "commit_id"]) {
+            Ok(out) => out.trim().is_empty(),
+            Err(_) => false,
+        }
+    }
+
     fn vcs_name(&self) -> &'static str {
         "jj"
     }

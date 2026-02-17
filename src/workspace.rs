@@ -317,6 +317,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         change_id: main_info.change_id.clone(),
         description: main_description,
         bookmarks: main_info.bookmarks.clone(),
+        is_stale: false,
     });
 
     // Scan workspace dirs
@@ -355,7 +356,14 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             .and_then(|m| m.modified())
             .ok();
 
+        let is_merged = if has_info {
+            deps.backend.is_merged_into_trunk(&main_repo, &path, &name)
+        } else {
+            false
+        };
+
         entries.push(WorkspaceEntry {
+            is_stale: compute_is_stale(false, is_merged, modified),
             name,
             path,
             last_modified: modified,
@@ -370,6 +378,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     Ok(entries)
 }
 
+const STALE_DAYS: u64 = 30;
+
 #[derive(Debug)]
 pub struct WorkspaceEntry {
     pub name: String,
@@ -380,6 +390,26 @@ pub struct WorkspaceEntry {
     pub change_id: String,
     pub description: String,
     pub bookmarks: Vec<String>,
+    pub is_stale: bool,
+}
+
+fn compute_is_stale(
+    is_main: bool,
+    is_merged: bool,
+    last_modified: Option<SystemTime>,
+) -> bool {
+    if is_main {
+        return false;
+    }
+    if is_merged {
+        return true;
+    }
+    if let Some(time) = last_modified
+        && let Ok(duration) = time.elapsed()
+    {
+        return duration.as_secs() > STALE_DAYS * 86400;
+    }
+    false
 }
 
 pub fn format_time_ago(time: Option<SystemTime>) -> String {
@@ -429,6 +459,8 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
     for entry in entries {
         let name_text = if entry.is_main {
             format!("{} (main)", entry.name)
+        } else if entry.is_stale {
+            format!("{} [stale]", entry.name)
         } else {
             entry.name.clone()
         };
@@ -587,6 +619,10 @@ mod tests {
             _ws_name: &str,
         ) -> String {
             "mock description".to_string()
+        }
+
+        fn is_merged_into_trunk(&self, _repo_dir: &Path, _worktree_dir: &Path, _ws_name: &str) -> bool {
+            false
         }
 
         fn vcs_name(&self) -> &'static str {
@@ -1010,6 +1046,36 @@ mod tests {
         assert!(err.to_string().contains("cannot rename"), "error: {}", err);
     }
 
+    // ── compute_is_stale tests ────────────────────────────────────
+
+    #[test]
+    fn stale_main_is_never_stale() {
+        assert!(!compute_is_stale(true, true, None));
+        assert!(!compute_is_stale(true, false, None));
+    }
+
+    #[test]
+    fn stale_merged_workspace_is_stale() {
+        assert!(compute_is_stale(false, true, Some(SystemTime::now())));
+    }
+
+    #[test]
+    fn stale_old_workspace_is_stale() {
+        let old_time = SystemTime::now() - std::time::Duration::from_secs(86400 * 31);
+        assert!(compute_is_stale(false, false, Some(old_time)));
+    }
+
+    #[test]
+    fn stale_recent_workspace_is_not_stale() {
+        let recent = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
+        assert!(!compute_is_stale(false, false, Some(recent)));
+    }
+
+    #[test]
+    fn stale_unknown_time_not_merged_is_not_stale() {
+        assert!(!compute_is_stale(false, false, None));
+    }
+
     // ── format_time_ago tests ───────────────────────────────────────
 
     #[test]
@@ -1061,6 +1127,7 @@ mod tests {
                 change_id: "abc12345".to_string(),
                 description: "main workspace".to_string(),
                 bookmarks: vec!["main".to_string()],
+                is_stale: false,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -1071,6 +1138,7 @@ mod tests {
                 change_id: "def67890".to_string(),
                 description: "feature work".to_string(),
                 bookmarks: vec![],
+                is_stale: false,
             },
         ];
         // Should not panic; output goes to stderr
