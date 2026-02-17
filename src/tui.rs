@@ -16,6 +16,7 @@ use crate::workspace::WorkspaceEntry;
 pub enum PickerResult {
     Selected(String),
     CreateNew(Option<String>),
+    Delete(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +82,7 @@ enum Mode {
     Browse,
     InputName,
     Filter,
+    ConfirmDelete(String),
 }
 
 struct App {
@@ -308,6 +310,7 @@ fn render(frame: &mut Frame, app: &App) {
         let help_text = match app.mode {
             Mode::InputName => " Enter: create  Esc: cancel".to_string(),
             Mode::Filter => format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf),
+            Mode::ConfirmDelete(ref name) => format!(" Delete '{}'? y: confirm  n: cancel", name),
             Mode::Browse if app.on_create_row() => {
                 " Enter: create (auto-name)  type: name it  q: quit".to_string()
             }
@@ -317,7 +320,7 @@ fn render(frame: &mut Frame, app: &App) {
                 } else {
                     String::new()
                 };
-                format!(" j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
+                format!(" j/k: navigate  /: filter  s: sort ({})  d: delete  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
             }
         };
         let help = Paragraph::new(help_text)
@@ -366,6 +369,14 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     }
                     KeyCode::Char('/') => {
                         app.mode = Mode::Filter;
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(idx) = app.selected_entry_index() {
+                            let entry = &app.entries[idx];
+                            if !entry.is_main {
+                                app.mode = Mode::ConfirmDelete(entry.name.clone());
+                            }
+                        }
                     }
                     KeyCode::Enter => {
                         if app.on_create_row() {
@@ -425,6 +436,17 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     KeyCode::Char(c) => {
                         app.filter_buf.push(c);
                         app.recompute_filter();
+                    }
+                    _ => {}
+                },
+                Mode::ConfirmDelete(ref name) => match key.code {
+                    KeyCode::Char('y') => {
+                        let name = name.clone();
+                        result = Some(PickerResult::Delete(name));
+                        break;
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        app.mode = Mode::Browse;
                     }
                     _ => {}
                 },

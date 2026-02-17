@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{jj, names};
 
+fn is_inside(cwd: &std::path::Path, ws_path: &std::path::Path) -> bool {
+    cwd.starts_with(ws_path)
+}
+
 fn jjws_base_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join(".jjws"))
@@ -55,7 +59,9 @@ pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_workspace(name: Option<String>) -> Result<()> {
+/// Deletes a workspace. Returns `true` if the cwd was inside the deleted
+/// workspace and a redirect path was printed to stdout.
+pub fn delete_workspace(name: Option<String>) -> Result<bool> {
     let cwd = std::env::current_dir()?;
     let jjws_base = jjws_base_dir()?;
 
@@ -113,10 +119,12 @@ pub fn delete_workspace(name: Option<String>) -> Result<()> {
     eprintln!("workspace '{}' deleted", ws_name);
 
     // If we're inside the deleted workspace, cd to main repo
-    if cwd.starts_with(&ws_path) {
+    if is_inside(&cwd, &ws_path) {
         println!("{}", main_repo.display());
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(())
 }
 
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
@@ -238,4 +246,35 @@ pub struct WorkspaceEntry {
     pub change_id: String,
     pub description: String,
     pub bookmarks: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn is_inside_detects_cwd_within_workspace() {
+        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        assert!(is_inside(ws, ws));
+        assert!(is_inside(
+            Path::new("/home/user/.jjws/myrepo/my-workspace/src"),
+            ws,
+        ));
+    }
+
+    #[test]
+    fn is_inside_false_for_sibling_workspace() {
+        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        assert!(!is_inside(
+            Path::new("/home/user/.jjws/myrepo/other-workspace"),
+            ws,
+        ));
+    }
+
+    #[test]
+    fn is_inside_false_for_main_repo() {
+        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        assert!(!is_inside(Path::new("/home/user/code/myrepo"), ws));
+    }
 }
