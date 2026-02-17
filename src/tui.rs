@@ -13,9 +13,22 @@ use std::time::SystemTime;
 
 use crate::workspace::WorkspaceEntry;
 
+pub enum PickerResult {
+    Selected(String),
+    CreateNew(Option<String>),
+}
+
+#[derive(PartialEq)]
+enum Mode {
+    Browse,
+    InputName,
+}
+
 struct App {
     entries: Vec<WorkspaceEntry>,
     selected: usize,
+    mode: Mode,
+    input_buf: String,
 }
 
 impl App {
@@ -23,18 +36,30 @@ impl App {
         Self {
             selected: 0,
             entries,
+            mode: Mode::Browse,
+            input_buf: String::new(),
         }
     }
 
+    fn total_rows(&self) -> usize {
+        self.entries.len() + 1 // +1 for "Create new" row
+    }
+
+    fn on_create_row(&self) -> bool {
+        self.selected == self.entries.len()
+    }
+
     fn next(&mut self) {
-        if !self.entries.is_empty() {
-            self.selected = (self.selected + 1) % self.entries.len();
+        let total = self.total_rows();
+        if total > 0 {
+            self.selected = (self.selected + 1) % total;
         }
     }
 
     fn previous(&mut self) {
-        if !self.entries.is_empty() {
-            self.selected = self.selected.checked_sub(1).unwrap_or(self.entries.len() - 1);
+        let total = self.total_rows();
+        if total > 0 {
+            self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
         }
     }
 }
@@ -76,7 +101,7 @@ fn render(frame: &mut Frame, app: &App) {
         .style(Style::default().bg(Color::DarkGray))
         .height(1);
 
-    let rows: Vec<Row> = app
+    let mut rows: Vec<Row> = app
         .entries
         .iter()
         .enumerate()
@@ -141,6 +166,32 @@ fn render(frame: &mut Frame, app: &App) {
         })
         .collect();
 
+    // Append "+ Create new" row
+    let create_row_selected = app.on_create_row();
+    let create_style = if create_row_selected {
+        Style::default().bg(Color::Rgb(40, 40, 60))
+    } else {
+        Style::default()
+    };
+
+    let create_name = if app.mode == Mode::InputName && create_row_selected {
+        format!("Name: {}_", app.input_buf)
+    } else {
+        "+ Create new".to_string()
+    };
+
+    rows.push(
+        Row::new(vec![
+            Cell::from(create_name).style(Style::default().fg(Color::Green)),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+        ])
+        .style(create_style),
+    );
+
     let widths = [
         Constraint::Percentage(15),
         Constraint::Percentage(8),
@@ -164,14 +215,19 @@ fn render(frame: &mut Frame, app: &App) {
 
     // Render help bar at bottom
     if area.height > 3 {
-        let help = Paragraph::new(" j/k: navigate  Enter: select  q: quit")
+        let help_text = if app.mode == Mode::InputName {
+            " Enter: create (empty = auto-name)  Esc: cancel"
+        } else {
+            " j/k: navigate  Enter: select  q: quit"
+        };
+        let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray));
         let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
         frame.render_widget(help, help_area);
     }
 }
 
-pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<String>> {
+pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
         eprintln!("no workspaces found");
         return Ok(None);
@@ -193,19 +249,48 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<String>> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    result = None;
-                    break;
-                }
-                KeyCode::Char('j') | KeyCode::Down => app.next(),
-                KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                KeyCode::Enter => {
-                    let path = app.entries[app.selected].path.to_string_lossy().to_string();
-                    result = Some(path);
-                    break;
-                }
-                _ => {}
+
+            match app.mode {
+                Mode::Browse => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        result = None;
+                        break;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => app.next(),
+                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Enter => {
+                        if app.on_create_row() {
+                            app.mode = Mode::InputName;
+                            app.input_buf.clear();
+                        } else {
+                            let path = app.entries[app.selected].path.to_string_lossy().to_string();
+                            result = Some(PickerResult::Selected(path));
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+                Mode::InputName => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = Mode::Browse;
+                    }
+                    KeyCode::Enter => {
+                        let name = if app.input_buf.trim().is_empty() {
+                            None
+                        } else {
+                            Some(app.input_buf.clone())
+                        };
+                        result = Some(PickerResult::CreateNew(name));
+                        break;
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buf.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buf.push(c);
+                    }
+                    _ => {}
+                },
             }
         }
     }
