@@ -43,6 +43,13 @@ impl SortMode {
     }
 }
 
+fn matches_filter(entry: &WorkspaceEntry, query: &str) -> bool {
+    let query = query.to_lowercase();
+    entry.name.to_lowercase().contains(&query)
+        || entry.description.to_lowercase().contains(&query)
+        || entry.bookmarks.iter().any(|b| b.to_lowercase().contains(&query))
+}
+
 fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
     match mode {
         SortMode::Name => {
@@ -73,6 +80,7 @@ fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
 enum Mode {
     Browse,
     InputName,
+    Filter,
 }
 
 struct App {
@@ -81,27 +89,40 @@ struct App {
     mode: Mode,
     input_buf: String,
     sort_mode: SortMode,
+    filter_buf: String,
+    filtered_indices: Vec<usize>,
 }
 
 impl App {
     fn new(mut entries: Vec<WorkspaceEntry>) -> Self {
         let sort_mode = SortMode::Recency;
         sort_entries(&mut entries, sort_mode);
+        let filtered_indices: Vec<usize> = (0..entries.len()).collect();
         Self {
             selected: 0,
             entries,
             mode: Mode::Browse,
             input_buf: String::new(),
             sort_mode,
+            filter_buf: String::new(),
+            filtered_indices,
         }
     }
 
+    fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
+        self.filtered_indices.iter().map(|&i| &self.entries[i]).collect()
+    }
+
     fn total_rows(&self) -> usize {
-        self.entries.len() + 1 // +1 for "Create new" row
+        self.filtered_indices.len() + 1 // +1 for "Create new" row
     }
 
     fn on_create_row(&self) -> bool {
-        self.selected == self.entries.len()
+        self.selected == self.filtered_indices.len()
+    }
+
+    fn selected_entry_index(&self) -> Option<usize> {
+        self.filtered_indices.get(self.selected).copied()
     }
 
     fn next(&mut self) {
@@ -115,6 +136,20 @@ impl App {
         let total = self.total_rows();
         if total > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
+        }
+    }
+
+    fn recompute_filter(&mut self) {
+        if self.filter_buf.is_empty() {
+            self.filtered_indices = (0..self.entries.len()).collect();
+        } else {
+            self.filtered_indices = self.entries.iter().enumerate()
+                .filter(|(_, e)| matches_filter(e, &self.filter_buf))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        if self.selected >= self.total_rows() {
+            self.selected = self.total_rows().saturating_sub(1);
         }
     }
 }
@@ -156,8 +191,8 @@ fn render(frame: &mut Frame, app: &App) {
         .style(Style::default().bg(Color::DarkGray))
         .height(1);
 
-    let mut rows: Vec<Row> = app
-        .entries
+    let visible = app.visible_entries();
+    let mut rows: Vec<Row> = visible
         .iter()
         .enumerate()
         .map(|(i, entry)| {
@@ -270,12 +305,20 @@ fn render(frame: &mut Frame, app: &App) {
 
     // Render help bar at bottom
     if area.height > 3 {
-        let help_text = if app.mode == Mode::InputName {
-            " Enter: create  Esc: cancel".to_string()
-        } else if app.on_create_row() {
-            " Enter: create (auto-name)  type: name it  q: quit".to_string()
-        } else {
-            format!(" j/k: navigate  s: sort ({})  Enter: select  q: quit", app.sort_mode.label())
+        let help_text = match app.mode {
+            Mode::InputName => " Enter: create  Esc: cancel".to_string(),
+            Mode::Filter => format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf),
+            Mode::Browse if app.on_create_row() => {
+                " Enter: create (auto-name)  type: name it  q: quit".to_string()
+            }
+            Mode::Browse => {
+                let filter_info = if !app.filter_buf.is_empty() {
+                    format!("  [filter: \"{}\"]", app.filter_buf)
+                } else {
+                    String::new()
+                };
+                format!(" j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
+            }
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray));
@@ -318,14 +361,18 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     KeyCode::Char('s') => {
                         app.sort_mode = app.sort_mode.next();
                         sort_entries(&mut app.entries, app.sort_mode);
+                        app.recompute_filter();
                         app.selected = 0;
+                    }
+                    KeyCode::Char('/') => {
+                        app.mode = Mode::Filter;
                     }
                     KeyCode::Enter => {
                         if app.on_create_row() {
                             result = Some(PickerResult::CreateNew(None));
                             break;
-                        } else {
-                            let path = app.entries[app.selected].path.to_string_lossy().to_string();
+                        } else if let Some(idx) = app.selected_entry_index() {
+                            let path = app.entries[idx].path.to_string_lossy().to_string();
                             result = Some(PickerResult::Selected(path));
                             break;
                         }
@@ -359,6 +406,25 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     }
                     KeyCode::Char(c) => {
                         app.input_buf.push(c);
+                    }
+                    _ => {}
+                },
+                Mode::Filter => match key.code {
+                    KeyCode::Esc => {
+                        app.filter_buf.clear();
+                        app.recompute_filter();
+                        app.mode = Mode::Browse;
+                    }
+                    KeyCode::Enter => {
+                        app.mode = Mode::Browse;
+                    }
+                    KeyCode::Backspace => {
+                        app.filter_buf.pop();
+                        app.recompute_filter();
+                    }
+                    KeyCode::Char(c) => {
+                        app.filter_buf.push(c);
+                        app.recompute_filter();
                     }
                     _ => {}
                 },
@@ -449,5 +515,53 @@ mod tests {
         assert_eq!(SortMode::Recency.next(), SortMode::Name);
         assert_eq!(SortMode::Name.next(), SortMode::DiffSize);
         assert_eq!(SortMode::DiffSize.next(), SortMode::Recency);
+    }
+
+    fn make_entry_with_desc(name: &str, description: &str, bookmarks: Vec<&str>) -> WorkspaceEntry {
+        WorkspaceEntry {
+            name: name.to_string(),
+            path: PathBuf::from(format!("/tmp/{}", name)),
+            last_modified: None,
+            diff_stat: DiffStat::default(),
+            is_main: false,
+            change_id: String::new(),
+            description: description.to_string(),
+            bookmarks: bookmarks.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn filter_matches_name() {
+        let entry = make_entry_with_desc("my-feature", "", vec![]);
+        assert!(matches_filter(&entry, "feat"));
+        assert!(!matches_filter(&entry, "bugfix"));
+    }
+
+    #[test]
+    fn filter_matches_description() {
+        let entry = make_entry_with_desc("ws1", "fix login bug", vec![]);
+        assert!(matches_filter(&entry, "login"));
+        assert!(!matches_filter(&entry, "signup"));
+    }
+
+    #[test]
+    fn filter_matches_bookmarks() {
+        let entry = make_entry_with_desc("ws1", "", vec!["main", "release-v2"]);
+        assert!(matches_filter(&entry, "release"));
+        assert!(!matches_filter(&entry, "develop"));
+    }
+
+    #[test]
+    fn filter_is_case_insensitive() {
+        let entry = make_entry_with_desc("MyFeature", "Fix Bug", vec!["Main"]);
+        assert!(matches_filter(&entry, "myfeature"));
+        assert!(matches_filter(&entry, "FIX"));
+        assert!(matches_filter(&entry, "main"));
+    }
+
+    #[test]
+    fn filter_no_match() {
+        let entry = make_entry_with_desc("ws1", "some desc", vec!["bk1"]);
+        assert!(!matches_filter(&entry, "zzz"));
     }
 }
