@@ -10,25 +10,30 @@ fn is_inside(cwd: &std::path::Path, ws_path: &std::path::Path) -> bool {
     cwd.starts_with(ws_path)
 }
 
-fn jjws_base_dir() -> Result<PathBuf> {
+fn dwm_base_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".jjws"))
+    Ok(home.join(".dwm"))
 }
 
-fn repo_dir(jjws_base: &Path, repo_name: &str) -> PathBuf {
-    jjws_base.join(repo_name)
+fn repo_dir(dwm_base: &Path, repo_name: &str) -> PathBuf {
+    dwm_base.join(repo_name)
 }
 
-fn main_repo_path(jjws_base: &Path, repo_name: &str) -> Result<PathBuf> {
-    let repo_dir = repo_dir(jjws_base, repo_name);
+fn main_repo_path(dwm_base: &Path, repo_name: &str) -> Result<PathBuf> {
+    let repo_dir = repo_dir(dwm_base, repo_name);
     let main_repo_file = repo_dir.join(".main-repo");
     let path = fs::read_to_string(&main_repo_file)
         .with_context(|| format!("could not read {}", main_repo_file.display()))?;
     Ok(PathBuf::from(path.trim()))
 }
 
-fn ensure_repo_dir(jjws_base: &Path, repo_name: &str, main_repo_root: &Path, vcs_type: &str) -> Result<PathBuf> {
-    let dir = repo_dir(jjws_base, repo_name);
+fn ensure_repo_dir(
+    dwm_base: &Path,
+    repo_name: &str,
+    main_repo_root: &Path,
+    vcs_type: &str,
+) -> Result<PathBuf> {
+    let dir = repo_dir(dwm_base, repo_name);
     fs::create_dir_all(&dir)?;
     let main_repo_file = dir.join(".main-repo");
     if !main_repo_file.exists() {
@@ -44,21 +49,25 @@ fn ensure_repo_dir(jjws_base: &Path, repo_name: &str, main_repo_root: &Path, vcs
 struct WorkspaceDeps {
     backend: Box<dyn vcs::VcsBackend>,
     cwd: PathBuf,
-    jjws_base: PathBuf,
+    dwm_base: PathBuf,
 }
 
 pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let jjws_base = jjws_base_dir()?;
-    let deps = WorkspaceDeps { backend, cwd, jjws_base };
+    let dwm_base = dwm_base_dir()?;
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
     new_workspace_inner(&deps, name, at)
 }
 
 fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&str>) -> Result<()> {
     let repo_name = deps.backend.repo_name_from(&deps.cwd)?;
     let root = deps.backend.root_from(&deps.cwd)?;
-    let dir = ensure_repo_dir(&deps.jjws_base, &repo_name, &root, deps.backend.vcs_name())?;
+    let dir = ensure_repo_dir(&deps.dwm_base, &repo_name, &root, deps.backend.vcs_name())?;
 
     let ws_name = match name {
         Some(n) => n,
@@ -67,7 +76,11 @@ fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&s
 
     let ws_path = dir.join(&ws_name);
     if ws_path.exists() {
-        bail!("workspace '{}' already exists at {}", ws_name, ws_path.display());
+        bail!(
+            "workspace '{}' already exists at {}",
+            ws_name,
+            ws_path.display()
+        );
     }
 
     eprintln!("creating workspace '{}'...", ws_name);
@@ -83,35 +96,41 @@ fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&s
 /// workspace and a redirect path was printed to stdout.
 pub fn delete_workspace(name: Option<String>) -> Result<bool> {
     let cwd = std::env::current_dir()?;
-    let jjws_base = jjws_base_dir()?;
+    let dwm_base = dwm_base_dir()?;
 
     // We need a backend for the repo-name-from-cwd case.
-    // When inside jjws dir we detect from the jjws repo dir;
+    // When inside dwm dir we detect from the dwm repo dir;
     // otherwise we detect from cwd.
-    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&jjws_base) {
-        let relative = cwd.strip_prefix(&jjws_base)?;
-        let repo_name_str = relative.components()
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        let repo_name_str = relative
+            .components()
             .next()
             .context("could not determine repo from workspace path")?
             .as_os_str()
             .to_string_lossy()
             .to_string();
-        let rd = repo_dir(&jjws_base, &repo_name_str);
-        vcs::detect_from_jjws_dir(&rd)?
+        let rd = repo_dir(&dwm_base, &repo_name_str);
+        vcs::detect_from_dwm_dir(&rd)?
     } else {
         vcs::detect(&cwd)?
     };
 
-    let deps = WorkspaceDeps { backend, cwd, jjws_base };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
     delete_workspace_inner(&deps, name)
 }
 
 fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<bool> {
     let (repo_name_str, ws_name) = match name {
         Some(name) => {
-            let repo_name_str = if deps.cwd.starts_with(&deps.jjws_base) {
-                let relative = deps.cwd.strip_prefix(&deps.jjws_base)?;
-                relative.components()
+            let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
+                let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+                relative
+                    .components()
                     .next()
                     .context("could not determine repo from workspace path")?
                     .as_os_str()
@@ -123,16 +142,15 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
             (repo_name_str, name)
         }
         None => {
-            if !deps.cwd.starts_with(&deps.jjws_base) {
+            if !deps.cwd.starts_with(&deps.dwm_base) {
                 bail!(
-                    "not inside a jjws workspace (current dir must be under {})",
-                    deps.jjws_base.display()
+                    "not inside a dwm workspace (current dir must be under {})",
+                    deps.dwm_base.display()
                 );
             }
-            let relative = deps.cwd.strip_prefix(&deps.jjws_base)?;
-            let components: Vec<&std::ffi::OsStr> = relative.components()
-                .map(|c| c.as_os_str())
-                .collect();
+            let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+            let components: Vec<&std::ffi::OsStr> =
+                relative.components().map(|c| c.as_os_str()).collect();
             if components.len() < 2 {
                 bail!("could not determine workspace name from current directory");
             }
@@ -143,15 +161,16 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
         }
     };
 
-    let ws_path = deps.jjws_base.join(&repo_name_str).join(&ws_name);
+    let ws_path = deps.dwm_base.join(&repo_name_str).join(&ws_name);
     if !ws_path.exists() {
         bail!("workspace '{}' not found at {}", ws_name, ws_path.display());
     }
 
-    let main_repo = main_repo_path(&deps.jjws_base, &repo_name_str)?;
+    let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
     eprintln!("forgetting workspace '{}'...", ws_name);
-    deps.backend.workspace_remove(&main_repo, &ws_name, &ws_path)?;
+    deps.backend
+        .workspace_remove(&main_repo, &ws_name, &ws_path)?;
 
     eprintln!("removing {}...", ws_path.display());
     fs::remove_dir_all(&ws_path)?;
@@ -167,30 +186,36 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
 
 pub fn rename_workspace(old_name: String, new_name: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let jjws_base = jjws_base_dir()?;
+    let dwm_base = dwm_base_dir()?;
 
-    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&jjws_base) {
-        let relative = cwd.strip_prefix(&jjws_base)?;
-        let repo_name_str = relative.components()
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        let repo_name_str = relative
+            .components()
             .next()
             .context("could not determine repo from workspace path")?
             .as_os_str()
             .to_string_lossy()
             .to_string();
-        let rd = repo_dir(&jjws_base, &repo_name_str);
-        vcs::detect_from_jjws_dir(&rd)?
+        let rd = repo_dir(&dwm_base, &repo_name_str);
+        vcs::detect_from_dwm_dir(&rd)?
     } else {
         vcs::detect(&cwd)?
     };
 
-    let deps = WorkspaceDeps { backend, cwd, jjws_base };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
     rename_workspace_inner(&deps, &old_name, &new_name)
 }
 
 fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) -> Result<()> {
-    let repo_name_str = if deps.cwd.starts_with(&deps.jjws_base) {
-        let relative = deps.cwd.strip_prefix(&deps.jjws_base)?;
-        relative.components()
+    let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
+        let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+        relative
+            .components()
             .next()
             .context("could not determine repo from workspace path")?
             .as_os_str()
@@ -205,17 +230,25 @@ fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) 
         bail!("cannot rename the main workspace '{}'", old_name);
     }
 
-    let old_path = deps.jjws_base.join(&repo_name_str).join(old_name);
+    let old_path = deps.dwm_base.join(&repo_name_str).join(old_name);
     if !old_path.exists() {
-        bail!("workspace '{}' not found at {}", old_name, old_path.display());
+        bail!(
+            "workspace '{}' not found at {}",
+            old_name,
+            old_path.display()
+        );
     }
 
-    let new_path = deps.jjws_base.join(&repo_name_str).join(new_name);
+    let new_path = deps.dwm_base.join(&repo_name_str).join(new_name);
     if new_path.exists() {
-        bail!("workspace '{}' already exists at {}", new_name, new_path.display());
+        bail!(
+            "workspace '{}' already exists at {}",
+            new_name,
+            new_path.display()
+        );
     }
 
-    let main_repo = main_repo_path(&deps.jjws_base, &repo_name_str)?;
+    let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
     // Find the change_id for the old workspace
     let workspaces = deps.backend.workspace_list(&main_repo)?;
@@ -227,7 +260,8 @@ fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) 
 
     // Remove old workspace from VCS
     eprintln!("forgetting workspace '{}'...", old_name);
-    deps.backend.workspace_remove(&main_repo, old_name, &old_path)?;
+    deps.backend
+        .workspace_remove(&main_repo, old_name, &old_path)?;
 
     // Rename the directory
     eprintln!("renaming {} -> {}...", old_name, new_name);
@@ -235,7 +269,8 @@ fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) 
 
     // Re-add with new name at the same change
     eprintln!("re-adding workspace '{}' at {}...", new_name, change_id);
-    deps.backend.workspace_add(&main_repo, &new_path, new_name, Some(&change_id))?;
+    deps.backend
+        .workspace_add(&main_repo, &new_path, new_name, Some(&change_id))?;
 
     eprintln!("workspace '{}' renamed to '{}'", old_name, new_name);
     Ok(())
@@ -243,36 +278,42 @@ fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) 
 
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let cwd = std::env::current_dir()?;
-    let jjws_base = jjws_base_dir()?;
+    let dwm_base = dwm_base_dir()?;
 
-    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&jjws_base) {
-        let relative = cwd.strip_prefix(&jjws_base)?;
-        let repo_name_str = relative.components()
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        let repo_name_str = relative
+            .components()
             .next()
             .context("could not determine repo from workspace path")?
             .as_os_str()
             .to_string_lossy()
             .to_string();
-        let rd = repo_dir(&jjws_base, &repo_name_str);
-        vcs::detect_from_jjws_dir(&rd)?
+        let rd = repo_dir(&dwm_base, &repo_name_str);
+        vcs::detect_from_dwm_dir(&rd)?
     } else {
         vcs::detect(&cwd)?
     };
 
-    let deps = WorkspaceDeps { backend, cwd, jjws_base };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
     list_workspace_entries_inner(&deps)
 }
 
 fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEntry>> {
-    let (repo_name_str, main_repo) = if deps.cwd.starts_with(&deps.jjws_base) {
-        let relative = deps.cwd.strip_prefix(&deps.jjws_base)?;
-        let repo_name_str = relative.components()
+    let (repo_name_str, main_repo) = if deps.cwd.starts_with(&deps.dwm_base) {
+        let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
+        let repo_name_str = relative
+            .components()
             .next()
             .context("could not determine repo from workspace path")?
             .as_os_str()
             .to_string_lossy()
             .to_string();
-        let main_repo = main_repo_path(&deps.jjws_base, &repo_name_str)?;
+        let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
         (repo_name_str, main_repo)
     } else {
         let repo_name_str = deps.backend.repo_name_from(&deps.cwd)?;
@@ -280,7 +321,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         (repo_name_str, main_repo)
     };
 
-    let rd = repo_dir(&deps.jjws_base, &repo_name_str);
+    let rd = repo_dir(&deps.dwm_base, &repo_name_str);
     if !rd.exists() {
         return Ok(Vec::new());
     }
@@ -297,14 +338,14 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         .map(|(_, info)| info.clone())
         .unwrap_or_default();
 
-    let main_stat = deps.backend
+    let main_stat = deps
+        .backend
         .diff_stat_vs_trunk(&main_repo, &main_repo, main_ws_name)
         .unwrap_or_default();
-    let main_modified = fs::metadata(&main_repo)
-        .and_then(|m| m.modified())
-        .ok();
+    let main_modified = fs::metadata(&main_repo).and_then(|m| m.modified()).ok();
     let main_description = if main_info.description.trim().is_empty() {
-        deps.backend.latest_description(&main_repo, &main_repo, main_ws_name)
+        deps.backend
+            .latest_description(&main_repo, &main_repo, main_ws_name)
     } else {
         main_info.description.clone()
     };
@@ -353,9 +394,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             info.description.clone()
         };
 
-        let modified = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok();
+        let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
 
         let is_merged = if has_info {
             deps.backend.is_merged_into_trunk(&main_repo, &path, &name)
@@ -396,11 +435,7 @@ pub struct WorkspaceEntry {
     pub repo_name: Option<String>,
 }
 
-fn compute_is_stale(
-    is_main: bool,
-    is_merged: bool,
-    last_modified: Option<SystemTime>,
-) -> bool {
+fn compute_is_stale(is_main: bool, is_merged: bool, last_modified: Option<SystemTime>) -> bool {
     if is_main {
         return false;
     }
@@ -416,18 +451,18 @@ fn compute_is_stale(
 }
 
 pub fn list_all_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
-    let jjws_base = jjws_base_dir()?;
-    list_all_workspace_entries_inner(&jjws_base)
+    let dwm_base = dwm_base_dir()?;
+    list_all_workspace_entries_inner(&dwm_base)
 }
 
-fn list_all_workspace_entries_inner(jjws_base: &Path) -> Result<Vec<WorkspaceEntry>> {
-    if !jjws_base.exists() {
+fn list_all_workspace_entries_inner(dwm_base: &Path) -> Result<Vec<WorkspaceEntry>> {
+    if !dwm_base.exists() {
         return Ok(Vec::new());
     }
 
     let mut all_entries = Vec::new();
 
-    for dir_entry in fs::read_dir(jjws_base)? {
+    for dir_entry in fs::read_dir(dwm_base)? {
         let dir_entry = dir_entry?;
         let repo_path = dir_entry.path();
         if !repo_path.is_dir() {
@@ -441,7 +476,7 @@ fn list_all_workspace_entries_inner(jjws_base: &Path) -> Result<Vec<WorkspaceEnt
 
         let repo_name = dir_entry.file_name().to_string_lossy().to_string();
 
-        let backend = match vcs::detect_from_jjws_dir(&repo_path) {
+        let backend = match vcs::detect_from_dwm_dir(&repo_path) {
             Ok(b) => b,
             Err(_) => continue,
         };
@@ -449,7 +484,7 @@ fn list_all_workspace_entries_inner(jjws_base: &Path) -> Result<Vec<WorkspaceEnt
         let deps = WorkspaceDeps {
             backend,
             cwd: repo_path.clone(),
-            jjws_base: jjws_base.to_path_buf(),
+            dwm_base: dwm_base.to_path_buf(),
         };
 
         match list_workspace_entries_inner(&deps) {
@@ -498,12 +533,26 @@ pub fn format_time_ago(time: Option<SystemTime>) -> String {
 pub fn print_status(entries: &[WorkspaceEntry]) {
     let mut out = std::io::stderr().lock();
     // Column widths
-    let name_w = entries.iter().map(|e| {
-        let display = if e.is_main { format!("{} (main)", e.name) } else { e.name.clone() };
-        display.len()
-    }).max().unwrap_or(4).max(4);
+    let name_w = entries
+        .iter()
+        .map(|e| {
+            let display = if e.is_main {
+                format!("{} (main)", e.name)
+            } else {
+                e.name.clone()
+            };
+            display.len()
+        })
+        .max()
+        .unwrap_or(4)
+        .max(4);
     let change_w = 8;
-    let bookmark_w = entries.iter().map(|e| e.bookmarks.join(", ").len()).max().unwrap_or(9).max(9);
+    let bookmark_w = entries
+        .iter()
+        .map(|e| e.bookmarks.join(", ").len())
+        .max()
+        .unwrap_or(9)
+        .max(9);
 
     // Header
     let _ = writeln!(
@@ -528,7 +577,8 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
         let time_text = format_time_ago(entry.last_modified);
 
         let stat = &entry.diff_stat;
-        let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+        let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0
+        {
             "clean".to_string()
         } else {
             let mut parts = Vec::new();
@@ -548,12 +598,7 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
         let _ = writeln!(
             out,
             "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {}",
-            name_text,
-            entry.change_id,
-            desc_text,
-            bookmarks_text,
-            time_text,
-            changes_text,
+            name_text, entry.change_id, desc_text, bookmarks_text, time_text, changes_text,
         );
     }
 }
@@ -566,26 +611,26 @@ mod tests {
 
     #[test]
     fn is_inside_detects_cwd_within_workspace() {
-        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        let ws = Path::new("/home/user/.dwm/myrepo/my-workspace");
         assert!(is_inside(ws, ws));
         assert!(is_inside(
-            Path::new("/home/user/.jjws/myrepo/my-workspace/src"),
+            Path::new("/home/user/.dwm/myrepo/my-workspace/src"),
             ws,
         ));
     }
 
     #[test]
     fn is_inside_false_for_sibling_workspace() {
-        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        let ws = Path::new("/home/user/.dwm/myrepo/my-workspace");
         assert!(!is_inside(
-            Path::new("/home/user/.jjws/myrepo/other-workspace"),
+            Path::new("/home/user/.dwm/myrepo/other-workspace"),
             ws,
         ));
     }
 
     #[test]
     fn is_inside_false_for_main_repo() {
-        let ws = Path::new("/home/user/.jjws/myrepo/my-workspace");
+        let ws = Path::new("/home/user/.dwm/myrepo/my-workspace");
         assert!(!is_inside(Path::new("/home/user/code/myrepo"), ws));
     }
 
@@ -616,7 +661,10 @@ mod tests {
     }
 
     impl MockBackend {
-        fn new(root: PathBuf, workspaces: Vec<(String, vcs::WorkspaceInfo)>) -> (Self, Arc<Mutex<Vec<MockCall>>>) {
+        fn new(
+            root: PathBuf,
+            workspaces: Vec<(String, vcs::WorkspaceInfo)>,
+        ) -> (Self, Arc<Mutex<Vec<MockCall>>>) {
             let calls = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
@@ -638,7 +686,13 @@ mod tests {
             Ok(self.workspaces.clone())
         }
 
-        fn workspace_add(&self, repo_dir: &Path, ws_path: &Path, name: &str, at: Option<&str>) -> Result<()> {
+        fn workspace_add(
+            &self,
+            repo_dir: &Path,
+            ws_path: &Path,
+            name: &str,
+            at: Option<&str>,
+        ) -> Result<()> {
             self.calls.lock().unwrap().push(MockCall::WorkspaceAdd {
                 repo_dir: repo_dir.to_path_buf(),
                 ws_path: ws_path.to_path_buf(),
@@ -665,7 +719,11 @@ mod tests {
             _worktree_dir: &Path,
             _ws_name: &str,
         ) -> Result<vcs::DiffStat> {
-            Ok(vcs::DiffStat { files_changed: 1, insertions: 10, deletions: 2 })
+            Ok(vcs::DiffStat {
+                files_changed: 1,
+                insertions: 10,
+                deletions: 2,
+            })
         }
 
         fn latest_description(
@@ -677,7 +735,12 @@ mod tests {
             "mock description".to_string()
         }
 
-        fn is_merged_into_trunk(&self, _repo_dir: &Path, _worktree_dir: &Path, _ws_name: &str) -> bool {
+        fn is_merged_into_trunk(
+            &self,
+            _repo_dir: &Path,
+            _worktree_dir: &Path,
+            _ws_name: &str,
+        ) -> bool {
             false
         }
 
@@ -690,50 +753,56 @@ mod tests {
         }
     }
 
-    // ── Helper to set up a jjws repo dir on disk ─────────────────────
+    // ── Helper to set up a dwm repo dir on disk ─────────────────────
 
-    /// Creates a jjws repo dir with `.main-repo` pointing at `main_repo`.
-    /// Returns the jjws_base path.
-    fn setup_jjws_dir(tmp: &Path, repo_name: &str, main_repo: &Path) -> PathBuf {
-        let jjws_base = tmp.join("jjws");
-        let rd = jjws_base.join(repo_name);
+    /// Creates a dwm repo dir with `.main-repo` pointing at `main_repo`.
+    /// Returns the dwm_base path.
+    fn setup_dwm_dir(tmp: &Path, repo_name: &str, main_repo: &Path) -> PathBuf {
+        let dwm_base = tmp.join("dwm");
+        let rd = dwm_base.join(repo_name);
         fs::create_dir_all(&rd).unwrap();
         fs::write(rd.join(".main-repo"), main_repo.to_string_lossy().as_ref()).unwrap();
         fs::write(rd.join(".vcs-type"), "mock").unwrap();
-        jjws_base
+        dwm_base
     }
 
     // ── list_workspace_entries_inner tests ────────────────────────────
 
     #[test]
-    fn list_entries_from_inside_jjws() {
+    fn list_entries_from_inside_dwm() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
         // Create a workspace subdir
-        let ws_dir = jjws_base.join("myrepo/feat-x");
+        let ws_dir = dwm_base.join("myrepo/feat-x");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let workspaces = vec![
-            ("default".to_string(), vcs::WorkspaceInfo {
-                change_id: "aaa".to_string(),
-                description: "main desc".to_string(),
-                bookmarks: vec!["main".to_string()],
-            }),
-            ("feat-x".to_string(), vcs::WorkspaceInfo {
-                change_id: "bbb".to_string(),
-                description: "feature".to_string(),
-                bookmarks: vec![],
-            }),
+            (
+                "default".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "aaa".to_string(),
+                    description: "main desc".to_string(),
+                    bookmarks: vec!["main".to_string()],
+                },
+            ),
+            (
+                "feat-x".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "bbb".to_string(),
+                    description: "feature".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
         ];
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), workspaces);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.clone(),
-            jjws_base,
+            dwm_base,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -757,22 +826,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
-        let workspaces = vec![
-            ("default".to_string(), vcs::WorkspaceInfo {
+        let workspaces = vec![(
+            "default".to_string(),
+            vcs::WorkspaceInfo {
                 change_id: "abc".to_string(),
                 description: "".to_string(),
                 bookmarks: vec![],
-            }),
-        ];
+            },
+        )];
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), workspaces);
-        // cwd is the repo itself (outside jjws)
+        // cwd is the repo itself (outside dwm)
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
-            jjws_base,
+            dwm_base,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -787,14 +857,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        // Don't create jjws dir — repo_dir won't exist
-        let jjws_base = tmp.path().join("jjws");
+        // Don't create dwm dir — repo_dir won't exist
+        let dwm_base = tmp.path().join("dwm");
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -808,13 +878,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = tmp.path().join("jjws");
+        let dwm_base = tmp.path().join("dwm");
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
-            jjws_base: jjws_base.clone(),
+            dwm_base: dwm_base.clone(),
         };
 
         new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
@@ -822,9 +892,14 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceAdd { repo_dir, ws_path, name, at } => {
+            MockCall::WorkspaceAdd {
+                repo_dir,
+                ws_path,
+                name,
+                at,
+            } => {
                 assert_eq!(repo_dir, &main_repo);
-                assert_eq!(ws_path, &jjws_base.join("myrepo/my-ws"));
+                assert_eq!(ws_path, &dwm_base.join("myrepo/my-ws"));
                 assert_eq!(name, "my-ws");
                 assert!(at.is_none());
             }
@@ -837,13 +912,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = tmp.path().join("jjws");
+        let dwm_base = tmp.path().join("dwm");
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         new_workspace_inner(&deps, None, None).unwrap();
@@ -854,7 +929,11 @@ mod tests {
             MockCall::WorkspaceAdd { name, .. } => {
                 // Auto-generated name should be non-empty and contain a hyphen (adjective-noun)
                 assert!(!name.is_empty());
-                assert!(name.contains('-'), "auto name should be adjective-noun: {}", name);
+                assert!(
+                    name.contains('-'),
+                    "auto name should be adjective-noun: {}",
+                    name
+                );
             }
             other => panic!("expected WorkspaceAdd, got {:?}", other),
         }
@@ -865,13 +944,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = tmp.path().join("jjws");
+        let dwm_base = tmp.path().join("dwm");
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base: jjws_base.clone(),
+            dwm_base: dwm_base.clone(),
         };
 
         // Create workspace once
@@ -889,10 +968,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
         // Create the workspace dir to be deleted
-        let ws_dir = jjws_base.join("myrepo/my-ws");
+        let ws_dir = dwm_base.join("myrepo/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -900,7 +979,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
-            jjws_base: jjws_base.clone(),
+            dwm_base: dwm_base.clone(),
         };
 
         let redirected = delete_workspace_inner(&deps, Some("my-ws".to_string())).unwrap();
@@ -909,7 +988,11 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceRemove { repo_dir, name, ws_path } => {
+            MockCall::WorkspaceRemove {
+                repo_dir,
+                name,
+                ws_path,
+            } => {
                 assert_eq!(repo_dir, &main_repo);
                 assert_eq!(name, "my-ws");
                 assert_eq!(ws_path, &ws_dir);
@@ -926,9 +1009,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
-        let ws_dir = jjws_base.join("myrepo/my-ws");
+        let ws_dir = dwm_base.join("myrepo/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo, vec![]);
@@ -936,7 +1019,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.join("src"),
-            jjws_base,
+            dwm_base,
         };
 
         let redirected = delete_workspace_inner(&deps, Some("my-ws".to_string())).unwrap();
@@ -948,16 +1031,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
-        let ws_dir = jjws_base.join("myrepo/inferred-ws");
+        let ws_dir = dwm_base.join("myrepo/inferred-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.clone(),
-            jjws_base,
+            dwm_base,
         };
 
         // No name given — should infer repo=myrepo, ws=inferred-ws from cwd
@@ -977,13 +1060,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         let err = delete_workspace_inner(&deps, Some("nonexistent".to_string())).unwrap_err();
@@ -997,36 +1080,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
-        let ws_dir = jjws_base.join("myrepo/old-name");
+        let ws_dir = dwm_base.join("myrepo/old-name");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let workspaces = vec![
-            ("default".to_string(), vcs::WorkspaceInfo {
-                change_id: "aaa".to_string(),
-                description: "".to_string(),
-                bookmarks: vec![],
-            }),
-            ("old-name".to_string(), vcs::WorkspaceInfo {
-                change_id: "bbb".to_string(),
-                description: "some work".to_string(),
-                bookmarks: vec![],
-            }),
+            (
+                "default".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "aaa".to_string(),
+                    description: "".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
+            (
+                "old-name".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "bbb".to_string(),
+                    description: "some work".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
         ];
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), workspaces);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
-            jjws_base: jjws_base.clone(),
+            dwm_base: dwm_base.clone(),
         };
 
         rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
 
         // Old dir gone, new dir exists
         assert!(!ws_dir.exists());
-        assert!(jjws_base.join("myrepo/new-name").exists());
+        assert!(dwm_base.join("myrepo/new-name").exists());
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
@@ -1050,13 +1139,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         let err = rename_workspace_inner(&deps, "nonexistent", "new-name").unwrap_err();
@@ -1068,16 +1157,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
-        fs::create_dir_all(jjws_base.join("myrepo/old-name")).unwrap();
-        fs::create_dir_all(jjws_base.join("myrepo/new-name")).unwrap();
+        fs::create_dir_all(dwm_base.join("myrepo/old-name")).unwrap();
+        fs::create_dir_all(dwm_base.join("myrepo/new-name")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         let err = rename_workspace_inner(&deps, "old-name", "new-name").unwrap_err();
@@ -1089,13 +1178,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
-            jjws_base,
+            dwm_base,
         };
 
         let err = rename_workspace_inner(&deps, "default", "new-name").unwrap_err();
@@ -1107,7 +1196,7 @@ mod tests {
     #[test]
     fn list_all_entries_multiple_repos() {
         let tmp = tempfile::tempdir().unwrap();
-        let jjws_base = tmp.path().join("jjws");
+        let dwm_base = tmp.path().join("dwm");
 
         // Set up two repos
         let repo1 = tmp.path().join("repos/repo1");
@@ -1115,50 +1204,50 @@ mod tests {
         fs::create_dir_all(&repo1).unwrap();
         fs::create_dir_all(&repo2).unwrap();
 
-        // Create jjws dirs with .main-repo and .vcs-type
-        let rd1 = jjws_base.join("repo1");
+        // Create dwm dirs with .main-repo and .vcs-type
+        let rd1 = dwm_base.join("repo1");
         fs::create_dir_all(&rd1).unwrap();
         fs::write(rd1.join(".main-repo"), repo1.to_string_lossy().as_ref()).unwrap();
         fs::write(rd1.join(".vcs-type"), "mock").unwrap();
 
-        let rd2 = jjws_base.join("repo2");
+        let rd2 = dwm_base.join("repo2");
         fs::create_dir_all(&rd2).unwrap();
         fs::write(rd2.join(".main-repo"), repo2.to_string_lossy().as_ref()).unwrap();
         fs::write(rd2.join(".vcs-type"), "mock").unwrap();
 
         // list_all_workspace_entries_inner won't work with MockBackend since it
-        // uses detect_from_jjws_dir internally. The detect_from_jjws_dir will
+        // uses detect_from_dwm_dir internally. The detect_from_dwm_dir will
         // try to instantiate JjBackend or GitBackend. So we test the scanning
         // logic by checking it doesn't panic on dirs without .main-repo.
-        let rd3 = jjws_base.join("not-a-repo");
+        let rd3 = dwm_base.join("not-a-repo");
         fs::create_dir_all(&rd3).unwrap();
         // No .main-repo — should be skipped
 
         // We can't fully test this without real VCS backends, but we verify
         // the function doesn't panic and correctly skips dirs without .main-repo
         // We need to accept that entries for mock VCS type will fail at workspace_list
-        let result = list_all_workspace_entries_inner(&jjws_base);
+        let result = list_all_workspace_entries_inner(&dwm_base);
         // Should not panic; may return Ok or Err depending on mock backend availability
         assert!(result.is_ok() || result.is_err());
     }
 
     #[test]
-    fn list_all_entries_empty_jjws() {
+    fn list_all_entries_empty_dwm() {
         let tmp = tempfile::tempdir().unwrap();
-        let jjws_base = tmp.path().join("jjws");
+        let dwm_base = tmp.path().join("dwm");
         // Don't even create it
-        let entries = list_all_workspace_entries_inner(&jjws_base).unwrap();
+        let entries = list_all_workspace_entries_inner(&dwm_base).unwrap();
         assert!(entries.is_empty());
     }
 
     #[test]
     fn list_all_entries_no_repos() {
         let tmp = tempfile::tempdir().unwrap();
-        let jjws_base = tmp.path().join("jjws");
-        fs::create_dir_all(&jjws_base).unwrap();
+        let dwm_base = tmp.path().join("dwm");
+        fs::create_dir_all(&dwm_base).unwrap();
         // Create a file (not a dir)
-        fs::write(jjws_base.join("some-file"), "").unwrap();
-        let entries = list_all_workspace_entries_inner(&jjws_base).unwrap();
+        fs::write(dwm_base.join("some-file"), "").unwrap();
+        let entries = list_all_workspace_entries_inner(&dwm_base).unwrap();
         assert!(entries.is_empty());
     }
 
@@ -1238,7 +1327,11 @@ mod tests {
                 name: "default".to_string(),
                 path: PathBuf::from("/tmp/repo"),
                 last_modified: Some(SystemTime::now()),
-                diff_stat: vcs::DiffStat { files_changed: 1, insertions: 10, deletions: 2 },
+                diff_stat: vcs::DiffStat {
+                    files_changed: 1,
+                    insertions: 10,
+                    deletions: 2,
+                },
                 is_main: true,
                 change_id: "abc12345".to_string(),
                 description: "main workspace".to_string(),

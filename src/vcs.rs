@@ -29,7 +29,13 @@ pub trait VcsBackend {
     }
 
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>>;
-    fn workspace_add(&self, repo_dir: &Path, ws_path: &Path, name: &str, at: Option<&str>) -> Result<()>;
+    fn workspace_add(
+        &self,
+        repo_dir: &Path,
+        ws_path: &Path,
+        name: &str,
+        at: Option<&str>,
+    ) -> Result<()>;
     fn workspace_remove(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()>;
     fn diff_stat_vs_trunk(
         &self,
@@ -37,12 +43,7 @@ pub trait VcsBackend {
         worktree_dir: &Path,
         ws_name: &str,
     ) -> Result<DiffStat>;
-    fn latest_description(
-        &self,
-        repo_dir: &Path,
-        worktree_dir: &Path,
-        ws_name: &str,
-    ) -> String;
+    fn latest_description(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> String;
     fn is_merged_into_trunk(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> bool;
     fn vcs_name(&self) -> &'static str;
     fn main_workspace_name(&self) -> &'static str;
@@ -62,12 +63,15 @@ pub fn detect(dir: &Path) -> Result<Box<dyn VcsBackend>> {
             break;
         }
     }
-    bail!("no jj or git repository found in {} or any parent directory", dir.display())
+    bail!(
+        "no jj or git repository found in {} or any parent directory",
+        dir.display()
+    )
 }
 
-/// Detect VCS from a jjws repo directory by reading the `.vcs-type` file.
+/// Detect VCS from a dwm repo directory by reading the `.vcs-type` file.
 /// Defaults to jj for backward compatibility if the file doesn't exist.
-pub fn detect_from_jjws_dir(repo_dir: &Path) -> Result<Box<dyn VcsBackend>> {
+pub fn detect_from_dwm_dir(repo_dir: &Path) -> Result<Box<dyn VcsBackend>> {
     let vcs_file = repo_dir.join(".vcs-type");
     let vcs_type = if vcs_file.exists() {
         std::fs::read_to_string(&vcs_file)
@@ -207,32 +211,32 @@ mod tests {
     }
 
     #[test]
-    fn detect_from_jjws_dir_defaults_to_jj() {
+    fn detect_from_dwm_dir_defaults_to_jj() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = detect_from_jjws_dir(dir.path()).unwrap();
+        let backend = detect_from_dwm_dir(dir.path()).unwrap();
         assert_eq!(backend.vcs_name(), "jj");
     }
 
     #[test]
-    fn detect_from_jjws_dir_reads_git() {
+    fn detect_from_dwm_dir_reads_git() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".vcs-type"), "git").unwrap();
-        let backend = detect_from_jjws_dir(dir.path()).unwrap();
+        let backend = detect_from_dwm_dir(dir.path()).unwrap();
         assert_eq!(backend.vcs_name(), "git");
     }
 
     #[test]
-    fn detect_from_jjws_dir_reads_jj() {
+    fn detect_from_dwm_dir_reads_jj() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".vcs-type"), "jj").unwrap();
-        let backend = detect_from_jjws_dir(dir.path()).unwrap();
+        let backend = detect_from_dwm_dir(dir.path()).unwrap();
         assert_eq!(backend.vcs_name(), "jj");
     }
 
     #[test]
-    fn detect_from_jjws_dir_unknown_type() {
+    fn detect_from_dwm_dir_unknown_type() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".vcs-type"), "svn").unwrap();
-        assert!(detect_from_jjws_dir(dir.path()).is_err());
+        assert!(detect_from_dwm_dir(dir.path()).is_err());
     }
 }

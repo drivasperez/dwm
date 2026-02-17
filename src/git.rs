@@ -137,7 +137,13 @@ impl VcsBackend for GitBackend {
         Ok(results)
     }
 
-    fn workspace_add(&self, repo_dir: &Path, ws_path: &Path, name: &str, _at: Option<&str>) -> Result<()> {
+    fn workspace_add(
+        &self,
+        repo_dir: &Path,
+        ws_path: &Path,
+        name: &str,
+        _at: Option<&str>,
+    ) -> Result<()> {
         let path_str = ws_path.to_string_lossy();
         run_git_in(repo_dir, &["worktree", "add", &path_str, "-b", name])?;
         Ok(())
@@ -163,12 +169,7 @@ impl VcsBackend for GitBackend {
         }
     }
 
-    fn latest_description(
-        &self,
-        _repo_dir: &Path,
-        worktree_dir: &Path,
-        _ws_name: &str,
-    ) -> String {
+    fn latest_description(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> String {
         run_git_in(worktree_dir, &["log", "--format=%s", "-1"])
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
@@ -177,7 +178,11 @@ impl VcsBackend for GitBackend {
     fn is_merged_into_trunk(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> bool {
         let trunk = detect_trunk(worktree_dir);
         // Check if HEAD is an ancestor of trunk (i.e., fully merged)
-        run_git_in(worktree_dir, &["merge-base", "--is-ancestor", "HEAD", &trunk]).is_ok()
+        run_git_in(
+            worktree_dir,
+            &["merge-base", "--is-ancestor", "HEAD", &trunk],
+        )
+        .is_ok()
     }
 
     fn vcs_name(&self) -> &'static str {
@@ -200,7 +205,7 @@ worktree /home/user/project
 HEAD abc1234567890
 branch refs/heads/main
 
-worktree /home/user/.jjws/project/feature
+worktree /home/user/.dwm/project/feature
 HEAD def4567890123
 branch refs/heads/feature
 
@@ -212,7 +217,7 @@ branch refs/heads/feature
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
         assert_eq!(
             entries[1].path,
-            PathBuf::from("/home/user/.jjws/project/feature")
+            PathBuf::from("/home/user/.dwm/project/feature")
         );
         assert_eq!(entries[1].branch.as_deref(), Some("feature"));
     }
@@ -305,7 +310,14 @@ branch refs/heads/main
         }
         // Need at least one commit for the branch to exist
         let _ = Command::new("git")
-            .args(["-C", dir.path().to_str().unwrap(), "commit", "--allow-empty", "-m", "init"])
+            .args([
+                "-C",
+                dir.path().to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
             .output();
         let trunk = detect_trunk(dir.path());
         assert_eq!(trunk, "main");
@@ -321,7 +333,14 @@ branch refs/heads/main
             return;
         }
         let _ = Command::new("git")
-            .args(["-C", dir.path().to_str().unwrap(), "commit", "--allow-empty", "-m", "init"])
+            .args([
+                "-C",
+                dir.path().to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
             .output();
         let trunk = detect_trunk(dir.path());
         assert_eq!(trunk, "master");

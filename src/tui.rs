@@ -3,11 +3,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    Frame,
-    prelude::*,
-    widgets::*,
-};
+use ratatui::{Frame, prelude::*, widgets::*};
 use std::io;
 
 use crate::workspace::{WorkspaceEntry, format_time_ago};
@@ -47,7 +43,10 @@ fn matches_filter(entry: &WorkspaceEntry, query: &str) -> bool {
     let query = query.to_lowercase();
     entry.name.to_lowercase().contains(&query)
         || entry.description.to_lowercase().contains(&query)
-        || entry.bookmarks.iter().any(|b| b.to_lowercase().contains(&query))
+        || entry
+            .bookmarks
+            .iter()
+            .any(|b| b.to_lowercase().contains(&query))
 }
 
 fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
@@ -111,7 +110,10 @@ impl App {
     }
 
     fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
-        self.filtered_indices.iter().map(|&i| &self.entries[i]).collect()
+        self.filtered_indices
+            .iter()
+            .map(|&i| &self.entries[i])
+            .collect()
     }
 
     fn total_rows(&self) -> usize {
@@ -144,7 +146,10 @@ impl App {
         if self.filter_buf.is_empty() {
             self.filtered_indices = (0..self.entries.len()).collect();
         } else {
-            self.filtered_indices = self.entries.iter().enumerate()
+            self.filtered_indices = self
+                .entries
+                .iter()
+                .enumerate()
                 .filter(|(_, e)| matches_filter(e, &self.filter_buf))
                 .map(|(i, _)| i)
                 .collect();
@@ -158,9 +163,16 @@ impl App {
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let header_cells = ["Name", "Change", "Description", "Bookmarks", "Modified", "Changes"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
+    let header_cells = [
+        "Name",
+        "Change",
+        "Description",
+        "Bookmarks",
+        "Modified",
+        "Changes",
+    ]
+    .iter()
+    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
     let header = Row::new(header_cells)
         .style(Style::default().bg(Color::DarkGray))
         .height(1);
@@ -180,33 +192,30 @@ fn render(frame: &mut Frame, app: &App) {
 
             let change_text = entry.change_id.clone();
 
-            let desc_text = entry.description
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let desc_text = entry.description.lines().next().unwrap_or("").to_string();
 
             let bookmarks_text = entry.bookmarks.join(", ");
 
             let time_text = format_time_ago(entry.last_modified);
 
             let stat = &entry.diff_stat;
-            let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
-                "clean".to_string()
-            } else {
-                let mut parts = Vec::new();
-                if stat.insertions > 0 {
-                    parts.push(format!("+{}", stat.insertions));
-                }
-                if stat.deletions > 0 {
-                    parts.push(format!("-{}", stat.deletions));
-                }
-                if parts.is_empty() {
-                    format!("{} files", stat.files_changed)
+            let changes_text =
+                if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+                    "clean".to_string()
                 } else {
-                    parts.join(" ")
-                }
-            };
+                    let mut parts = Vec::new();
+                    if stat.insertions > 0 {
+                        parts.push(format!("+{}", stat.insertions));
+                    }
+                    if stat.deletions > 0 {
+                        parts.push(format!("-{}", stat.deletions));
+                    }
+                    if parts.is_empty() {
+                        format!("{} files", stat.files_changed)
+                    } else {
+                        parts.join(" ")
+                    }
+                };
 
             let style = if i == app.selected {
                 Style::default().bg(Color::Rgb(40, 40, 60))
@@ -283,7 +292,7 @@ fn render(frame: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" jjws workspaces ")
+                .title(" dwm workspaces ")
                 .title_alignment(Alignment::Center),
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
@@ -305,11 +314,14 @@ fn render(frame: &mut Frame, app: &App) {
                 } else {
                     String::new()
                 };
-                format!(" j/k: navigate  /: filter  s: sort ({})  d: delete  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
+                format!(
+                    " j/k: navigate  /: filter  s: sort ({})  d: delete  Enter: select  q: quit{}",
+                    app.sort_mode.label(),
+                    filter_info
+                )
             }
         };
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray));
+        let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
         let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
         frame.render_widget(help, help_area);
     }
@@ -474,7 +486,10 @@ impl MultiRepoApp {
     }
 
     fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
-        self.filtered_indices.iter().map(|&i| &self.entries[i]).collect()
+        self.filtered_indices
+            .iter()
+            .map(|&i| &self.entries[i])
+            .collect()
     }
 
     fn total_rows(&self) -> usize {
@@ -499,7 +514,10 @@ impl MultiRepoApp {
         if self.filter_buf.is_empty() {
             self.filtered_indices = (0..self.entries.len()).collect();
         } else {
-            self.filtered_indices = self.entries.iter().enumerate()
+            self.filtered_indices = self
+                .entries
+                .iter()
+                .enumerate()
                 .filter(|(_, e)| matches_filter(e, &self.filter_buf))
                 .map(|(i, _)| i)
                 .collect();
@@ -513,9 +531,17 @@ impl MultiRepoApp {
 fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
     let area = frame.area();
 
-    let header_cells = ["Repo", "Name", "Change", "Description", "Bookmarks", "Modified", "Changes"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
+    let header_cells = [
+        "Repo",
+        "Name",
+        "Change",
+        "Description",
+        "Bookmarks",
+        "Modified",
+        "Changes",
+    ]
+    .iter()
+    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
     let header = Row::new(header_cells)
         .style(Style::default().bg(Color::DarkGray))
         .height(1);
@@ -541,14 +567,23 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
             let time_text = format_time_ago(entry.last_modified);
 
             let stat = &entry.diff_stat;
-            let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
-                "clean".to_string()
-            } else {
-                let mut parts = Vec::new();
-                if stat.insertions > 0 { parts.push(format!("+{}", stat.insertions)); }
-                if stat.deletions > 0 { parts.push(format!("-{}", stat.deletions)); }
-                if parts.is_empty() { format!("{} files", stat.files_changed) } else { parts.join(" ") }
-            };
+            let changes_text =
+                if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+                    "clean".to_string()
+                } else {
+                    let mut parts = Vec::new();
+                    if stat.insertions > 0 {
+                        parts.push(format!("+{}", stat.insertions));
+                    }
+                    if stat.deletions > 0 {
+                        parts.push(format!("-{}", stat.deletions));
+                    }
+                    if parts.is_empty() {
+                        format!("{} files", stat.files_changed)
+                    } else {
+                        parts.join(" ")
+                    }
+                };
 
             let style = if i == app.selected {
                 Style::default().bg(Color::Rgb(40, 40, 60))
@@ -600,7 +635,7 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" jjws workspaces (all repos) ")
+                .title(" dwm workspaces (all repos) ")
                 .title_alignment(Alignment::Center),
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
@@ -616,10 +651,13 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
             } else {
                 String::new()
             };
-            format!(" j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}", app.sort_mode.label(), filter_info)
+            format!(
+                " j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}",
+                app.sort_mode.label(),
+                filter_info
+            )
         };
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray));
+        let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
         let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
         frame.render_widget(help, help_area);
     }
@@ -712,12 +750,21 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
-    fn make_entry(name: &str, modified_secs_ago: Option<u64>, insertions: u32, deletions: u32) -> WorkspaceEntry {
+    fn make_entry(
+        name: &str,
+        modified_secs_ago: Option<u64>,
+        insertions: u32,
+        deletions: u32,
+    ) -> WorkspaceEntry {
         WorkspaceEntry {
             name: name.to_string(),
             path: PathBuf::from(format!("/tmp/{}", name)),
             last_modified: modified_secs_ago.map(|s| SystemTime::now() - Duration::from_secs(s)),
-            diff_stat: DiffStat { files_changed: 1, insertions, deletions },
+            diff_stat: DiffStat {
+                files_changed: 1,
+                insertions,
+                deletions,
+            },
             is_main: false,
             change_id: String::new(),
             description: String::new(),
