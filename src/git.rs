@@ -162,7 +162,6 @@ impl VcsBackend for GitBackend {
         new_path: &Path,
         _old_name: &str,
         _new_name: &str,
-        _change_id: &str,
     ) -> Result<()> {
         let old_str = old_path.to_string_lossy();
         let new_str = new_path.to_string_lossy();
@@ -299,13 +298,10 @@ branch refs/heads/main
     #[test]
     fn integration_root_from() {
         let dir = tempfile::tempdir().unwrap();
-        let status = Command::new("git")
+        Command::new("git")
             .args(["init", dir.path().to_str().unwrap()])
-            .output();
-        if status.is_err() {
-            // git not installed, skip
-            return;
-        }
+            .output()
+            .expect("git must be installed to run this test");
         let backend = GitBackend;
         let root = backend.root_from(dir.path()).unwrap();
         // Canonicalize both for comparison (handles /private/tmp on macOS)
@@ -317,12 +313,10 @@ branch refs/heads/main
     #[test]
     fn integration_detect_trunk_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let status = Command::new("git")
+        Command::new("git")
             .args(["init", "-b", "main", dir.path().to_str().unwrap()])
-            .output();
-        if status.is_err() {
-            return;
-        }
+            .output()
+            .expect("git must be installed to run this test");
         // Need at least one commit for the branch to exist
         let _ = Command::new("git")
             .args([
@@ -341,12 +335,10 @@ branch refs/heads/main
     #[test]
     fn integration_detect_trunk_master() {
         let dir = tempfile::tempdir().unwrap();
-        let status = Command::new("git")
+        Command::new("git")
             .args(["init", "-b", "master", dir.path().to_str().unwrap()])
-            .output();
-        if status.is_err() {
-            return;
-        }
+            .output()
+            .expect("git must be installed to run this test");
         let _ = Command::new("git")
             .args([
                 "-C",

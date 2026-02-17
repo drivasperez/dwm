@@ -51,9 +51,9 @@ pub fn repo_name() -> Result<String> {
 
 fn workspace_list_template() -> &'static str {
     concat!(
-        r#"name ++ "\0" ++ self.working_copy_commit().change_id().shortest(8) ++ "\0""#,
-        r#" ++ self.working_copy_commit().description() ++ "\0""#,
-        r#" ++ self.working_copy_commit().bookmarks().map(|b| b.name()).join(",") ++ "\0\n""#,
+        r#"name ++ "\0" ++ self.target().change_id().shortest(8) ++ "\0""#,
+        r#" ++ self.target().description() ++ "\0""#,
+        r#" ++ self.target().bookmarks().map(|b| b.name()).join(",") ++ "\0\n""#,
     )
 }
 
@@ -157,6 +157,23 @@ impl VcsBackend for JjBackend {
 
     fn workspace_remove(&self, repo_dir: &Path, name: &str, _ws_path: &Path) -> Result<()> {
         run_jj_in(repo_dir, &["workspace", "forget", name])?;
+        Ok(())
+    }
+
+    fn workspace_rename(
+        &self,
+        _repo_dir: &Path,
+        old_path: &Path,
+        new_path: &Path,
+        _old_name: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        // Update stale working copy before rename (common when workspace hasn't been used recently)
+        let _ = run_jj_in(old_path, &["workspace", "update-stale"]);
+        // jj workspace rename updates VCS metadata (run inside the workspace dir)
+        run_jj_in(old_path, &["workspace", "rename", new_name])?;
+        // Then move the directory
+        std::fs::rename(old_path, new_path)?;
         Ok(())
     }
 

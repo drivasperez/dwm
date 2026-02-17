@@ -37,6 +37,8 @@ pub trait VcsBackend {
         at: Option<&str>,
     ) -> Result<()>;
     fn workspace_remove(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()>;
+    /// Rename a workspace: update VCS metadata and move the directory.
+    /// `old_path` and `new_path` are the workspace directories on disk.
     fn workspace_rename(
         &self,
         repo_dir: &Path,
@@ -44,13 +46,8 @@ pub trait VcsBackend {
         new_path: &Path,
         old_name: &str,
         new_name: &str,
-        change_id: &str,
-    ) -> Result<()> {
-        // Default: remove + rename dir + add at same change
-        self.workspace_remove(repo_dir, old_name, old_path)?;
-        std::fs::rename(old_path, new_path)?;
-        self.workspace_add(repo_dir, new_path, new_name, Some(change_id))
-    }
+    ) -> Result<()>;
+
     fn diff_stat_vs_trunk(
         &self,
         repo_dir: &Path,
