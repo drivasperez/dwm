@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is dwm
 
-dwm is a TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS). It creates, lists, and deletes jj workspaces stored under `~/.dwm/<repo-name>/`, with a shell wrapper that auto-`cd`s into the selected workspace.
+dwm is a TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS) and git. It creates, lists, and deletes workspaces stored under `~/.dwm/<repo-name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
 
 ## Build & Test Commands
 
@@ -40,3 +40,7 @@ Every bug fix should include a regression test. New parsing functions and utilit
 - **jj template parsing:** `jj.rs` uses NUL-separated (`\0`) fields in jj templates with `\0\n` as record separator, parsed by `parse_workspace_info()`. This avoids issues with descriptions containing tabs/newlines.
 - **`latest_description()`** walks ancestors via `jj log` with revset `latest(ancestors(WS@) & description(glob:"?*"))` to find the first non-empty commit description.
 - **Workspace storage:** `~/.dwm/<repo>/.main-repo` file stores the path to the original repo. Each workspace is a subdirectory under `~/.dwm/<repo>/`.
+
+## Documentation
+
+When adding new features, subcommands, or changing existing behavior, keep `README.md` up to date with the changes.
