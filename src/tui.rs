@@ -9,9 +9,8 @@ use ratatui::{
     widgets::*,
 };
 use std::io;
-use std::time::SystemTime;
 
-use crate::workspace::WorkspaceEntry;
+use crate::workspace::{WorkspaceEntry, format_time_ago};
 
 pub enum PickerResult {
     Selected(String),
@@ -154,33 +153,6 @@ impl App {
             self.selected = self.total_rows().saturating_sub(1);
         }
     }
-}
-
-fn format_time_ago(time: Option<SystemTime>) -> String {
-    let Some(time) = time else {
-        return "unknown".to_string();
-    };
-    let Ok(duration) = time.elapsed() else {
-        return "unknown".to_string();
-    };
-    let secs = duration.as_secs();
-    if secs < 60 {
-        return "just now".to_string();
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{}m ago", mins);
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{}h ago", hours);
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format!("{}d ago", days);
-    }
-    let months = days / 30;
-    format!("{}mo ago", months)
 }
 
 fn render(frame: &mut Frame, app: &App) {

@@ -42,6 +42,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Status => {
+            let entries = workspace::list_workspace_entries()?;
+            workspace::print_status(&entries);
+            Ok(())
+        }
         Commands::Delete { name } => workspace::delete_workspace(name).map(|_| ()),
         Commands::ShellSetup => shell::print_shell_setup(),
     }

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::{names, vcs};
 
@@ -302,6 +304,94 @@ pub struct WorkspaceEntry {
     pub change_id: String,
     pub description: String,
     pub bookmarks: Vec<String>,
+}
+
+pub fn format_time_ago(time: Option<SystemTime>) -> String {
+    let Some(time) = time else {
+        return "unknown".to_string();
+    };
+    let Ok(duration) = time.elapsed() else {
+        return "unknown".to_string();
+    };
+    let secs = duration.as_secs();
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{}m ago", mins);
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{}h ago", hours);
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("{}d ago", days);
+    }
+    let months = days / 30;
+    format!("{}mo ago", months)
+}
+
+pub fn print_status(entries: &[WorkspaceEntry]) {
+    let mut out = std::io::stderr().lock();
+    // Column widths
+    let name_w = entries.iter().map(|e| {
+        let display = if e.is_main { format!("{} (main)", e.name) } else { e.name.clone() };
+        display.len()
+    }).max().unwrap_or(4).max(4);
+    let change_w = 8;
+    let bookmark_w = entries.iter().map(|e| e.bookmarks.join(", ").len()).max().unwrap_or(9).max(9);
+
+    // Header
+    let _ = writeln!(
+        out,
+        "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  CHANGES",
+        "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED",
+    );
+
+    for entry in entries {
+        let name_text = if entry.is_main {
+            format!("{} (main)", entry.name)
+        } else {
+            entry.name.clone()
+        };
+
+        let desc = entry.description.lines().next().unwrap_or("");
+        let desc_text: String = desc.chars().take(40).collect();
+
+        let bookmarks_text = entry.bookmarks.join(", ");
+        let time_text = format_time_ago(entry.last_modified);
+
+        let stat = &entry.diff_stat;
+        let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+            "clean".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if stat.insertions > 0 {
+                parts.push(format!("+{}", stat.insertions));
+            }
+            if stat.deletions > 0 {
+                parts.push(format!("-{}", stat.deletions));
+            }
+            if parts.is_empty() {
+                format!("{} files", stat.files_changed)
+            } else {
+                parts.join(" ")
+            }
+        };
+
+        let _ = writeln!(
+            out,
+            "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {}",
+            name_text,
+            entry.change_id,
+            desc_text,
+            bookmarks_text,
+            time_text,
+            changes_text,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -730,5 +820,72 @@ mod tests {
 
         let err = delete_workspace_inner(&deps, Some("nonexistent".to_string())).unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    // ── format_time_ago tests ───────────────────────────────────────
+
+    #[test]
+    fn format_time_ago_none_returns_unknown() {
+        assert_eq!(format_time_ago(None), "unknown");
+    }
+
+    #[test]
+    fn format_time_ago_just_now() {
+        let time = SystemTime::now() - std::time::Duration::from_secs(30);
+        assert_eq!(format_time_ago(Some(time)), "just now");
+    }
+
+    #[test]
+    fn format_time_ago_minutes() {
+        let time = SystemTime::now() - std::time::Duration::from_secs(300);
+        assert_eq!(format_time_ago(Some(time)), "5m ago");
+    }
+
+    #[test]
+    fn format_time_ago_hours() {
+        let time = SystemTime::now() - std::time::Duration::from_secs(7200);
+        assert_eq!(format_time_ago(Some(time)), "2h ago");
+    }
+
+    #[test]
+    fn format_time_ago_days() {
+        let time = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
+        assert_eq!(format_time_ago(Some(time)), "5d ago");
+    }
+
+    #[test]
+    fn format_time_ago_months() {
+        let time = SystemTime::now() - std::time::Duration::from_secs(86400 * 60);
+        assert_eq!(format_time_ago(Some(time)), "2mo ago");
+    }
+
+    // ── print_status tests ──────────────────────────────────────────
+
+    #[test]
+    fn print_status_does_not_panic() {
+        let entries = vec![
+            WorkspaceEntry {
+                name: "default".to_string(),
+                path: PathBuf::from("/tmp/repo"),
+                last_modified: Some(SystemTime::now()),
+                diff_stat: vcs::DiffStat { files_changed: 1, insertions: 10, deletions: 2 },
+                is_main: true,
+                change_id: "abc12345".to_string(),
+                description: "main workspace".to_string(),
+                bookmarks: vec!["main".to_string()],
+            },
+            WorkspaceEntry {
+                name: "feat-x".to_string(),
+                path: PathBuf::from("/tmp/feat-x"),
+                last_modified: None,
+                diff_stat: vcs::DiffStat::default(),
+                is_main: false,
+                change_id: "def67890".to_string(),
+                description: "feature work".to_string(),
+                bookmarks: vec![],
+            },
+        ];
+        // Should not panic; output goes to stderr
+        print_status(&entries);
     }
 }

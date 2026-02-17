@@ -19,6 +19,8 @@ pub enum Commands {
     },
     /// List workspaces and pick one interactively
     List,
+    /// Print a non-interactive workspace summary
+    Status,
     /// Delete a workspace (by name, or the current one if omitted)
     Delete {
         /// Workspace name to delete
