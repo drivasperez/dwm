@@ -21,6 +21,13 @@ pub enum Commands {
     List,
     /// Print a non-interactive workspace summary
     Status,
+    /// Rename a workspace
+    Rename {
+        /// Current workspace name
+        old_name: String,
+        /// New workspace name
+        new_name: String,
+    },
     /// Delete a workspace (by name, or the current one if omitted)
     Delete {
         /// Workspace name to delete

@@ -165,6 +165,82 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
     }
 }
 
+pub fn rename_workspace(old_name: String, new_name: String) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let jjws_base = jjws_base_dir()?;
+
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&jjws_base) {
+        let relative = cwd.strip_prefix(&jjws_base)?;
+        let repo_name_str = relative.components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let rd = repo_dir(&jjws_base, &repo_name_str);
+        vcs::detect_from_jjws_dir(&rd)?
+    } else {
+        vcs::detect(&cwd)?
+    };
+
+    let deps = WorkspaceDeps { backend, cwd, jjws_base };
+    rename_workspace_inner(&deps, &old_name, &new_name)
+}
+
+fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) -> Result<()> {
+    let repo_name_str = if deps.cwd.starts_with(&deps.jjws_base) {
+        let relative = deps.cwd.strip_prefix(&deps.jjws_base)?;
+        relative.components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        deps.backend.repo_name_from(&deps.cwd)?
+    };
+
+    let main_ws_name = deps.backend.main_workspace_name();
+    if old_name == main_ws_name {
+        bail!("cannot rename the main workspace '{}'", old_name);
+    }
+
+    let old_path = deps.jjws_base.join(&repo_name_str).join(old_name);
+    if !old_path.exists() {
+        bail!("workspace '{}' not found at {}", old_name, old_path.display());
+    }
+
+    let new_path = deps.jjws_base.join(&repo_name_str).join(new_name);
+    if new_path.exists() {
+        bail!("workspace '{}' already exists at {}", new_name, new_path.display());
+    }
+
+    let main_repo = main_repo_path(&deps.jjws_base, &repo_name_str)?;
+
+    // Find the change_id for the old workspace
+    let workspaces = deps.backend.workspace_list(&main_repo)?;
+    let change_id = workspaces
+        .iter()
+        .find(|(n, _)| n == old_name)
+        .map(|(_, info)| info.change_id.clone())
+        .with_context(|| format!("workspace '{}' not found in VCS", old_name))?;
+
+    // Remove old workspace from VCS
+    eprintln!("forgetting workspace '{}'...", old_name);
+    deps.backend.workspace_remove(&main_repo, old_name, &old_path)?;
+
+    // Rename the directory
+    eprintln!("renaming {} -> {}...", old_name, new_name);
+    fs::rename(&old_path, &new_path)?;
+
+    // Re-add with new name at the same change
+    eprintln!("re-adding workspace '{}' at {}...", new_name, change_id);
+    deps.backend.workspace_add(&main_repo, &new_path, new_name, Some(&change_id))?;
+
+    eprintln!("workspace '{}' renamed to '{}'", old_name, new_name);
+    Ok(())
+}
+
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let cwd = std::env::current_dir()?;
     let jjws_base = jjws_base_dir()?;
@@ -820,6 +896,118 @@ mod tests {
 
         let err = delete_workspace_inner(&deps, Some("nonexistent".to_string())).unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    // ── rename_workspace_inner tests ──────────────────────────────
+
+    #[test]
+    fn rename_workspace_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+
+        let ws_dir = jjws_base.join("myrepo/old-name");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let workspaces = vec![
+            ("default".to_string(), vcs::WorkspaceInfo {
+                change_id: "aaa".to_string(),
+                description: "".to_string(),
+                bookmarks: vec![],
+            }),
+            ("old-name".to_string(), vcs::WorkspaceInfo {
+                change_id: "bbb".to_string(),
+                description: "some work".to_string(),
+                bookmarks: vec![],
+            }),
+        ];
+
+        let (mock, calls) = MockBackend::new(main_repo.clone(), workspaces);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+            jjws_base: jjws_base.clone(),
+        };
+
+        rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
+
+        // Old dir gone, new dir exists
+        assert!(!ws_dir.exists());
+        assert!(jjws_base.join("myrepo/new-name").exists());
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        // First call: remove old
+        match &calls[0] {
+            MockCall::WorkspaceRemove { name, .. } => assert_eq!(name, "old-name"),
+            other => panic!("expected WorkspaceRemove, got {:?}", other),
+        }
+        // Second call: add new at same change
+        match &calls[1] {
+            MockCall::WorkspaceAdd { name, at, .. } => {
+                assert_eq!(name, "new-name");
+                assert_eq!(at.as_deref(), Some("bbb"));
+            }
+            other => panic!("expected WorkspaceAdd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rename_workspace_old_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            jjws_base,
+        };
+
+        let err = rename_workspace_inner(&deps, "nonexistent", "new-name").unwrap_err();
+        assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    #[test]
+    fn rename_workspace_new_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+
+        fs::create_dir_all(jjws_base.join("myrepo/old-name")).unwrap();
+        fs::create_dir_all(jjws_base.join("myrepo/new-name")).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            jjws_base,
+        };
+
+        let err = rename_workspace_inner(&deps, "old-name", "new-name").unwrap_err();
+        assert!(err.to_string().contains("already exists"), "error: {}", err);
+    }
+
+    #[test]
+    fn rename_workspace_refuses_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let jjws_base = setup_jjws_dir(tmp.path(), "myrepo", &main_repo);
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            jjws_base,
+        };
+
+        let err = rename_workspace_inner(&deps, "default", "new-name").unwrap_err();
+        assert!(err.to_string().contains("cannot rename"), "error: {}", err);
     }
 
     // ── format_time_ago tests ───────────────────────────────────────

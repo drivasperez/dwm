@@ -47,6 +47,7 @@ fn main() -> Result<()> {
             workspace::print_status(&entries);
             Ok(())
         }
+        Commands::Rename { old_name, new_name } => workspace::rename_workspace(old_name, new_name),
         Commands::Delete { name } => workspace::delete_workspace(name).map(|_| ()),
         Commands::ShellSetup => shell::print_shell_setup(),
     }
