@@ -172,8 +172,10 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
     deps.backend
         .workspace_remove(&main_repo, &ws_name, &ws_path)?;
 
-    eprintln!("removing {}...", ws_path.display());
-    fs::remove_dir_all(&ws_path)?;
+    if ws_path.exists() {
+        eprintln!("removing {}...", ws_path.display());
+        fs::remove_dir_all(&ws_path)?;
+    }
     eprintln!("workspace '{}' deleted", ws_name);
 
     if is_inside(&deps.cwd, &ws_path) {
@@ -258,19 +260,10 @@ fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) 
         .map(|(_, info)| info.change_id.clone())
         .with_context(|| format!("workspace '{}' not found in VCS", old_name))?;
 
-    // Remove old workspace from VCS
-    eprintln!("forgetting workspace '{}'...", old_name);
-    deps.backend
-        .workspace_remove(&main_repo, old_name, &old_path)?;
-
-    // Rename the directory
-    eprintln!("renaming {} -> {}...", old_name, new_name);
-    fs::rename(&old_path, &new_path)?;
-
-    // Re-add with new name at the same change
-    eprintln!("re-adding workspace '{}' at {}...", new_name, change_id);
-    deps.backend
-        .workspace_add(&main_repo, &new_path, new_name, Some(&change_id))?;
+    eprintln!("renaming workspace '{}' -> '{}'...", old_name, new_name);
+    deps.backend.workspace_rename(
+        &main_repo, &old_path, &new_path, old_name, new_name, &change_id,
+    )?;
 
     eprintln!("workspace '{}' renamed to '{}'", old_name, new_name);
     Ok(())
@@ -1354,5 +1347,285 @@ mod tests {
         ];
         // Should not panic; output goes to stderr
         print_status(&entries);
+    }
+
+    // ── E2E tests with real git repos ───────────────────────────────
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    /// Initialize a git repo with an initial commit.
+    /// Returns the canonicalized repo path.
+    fn init_git_repo(dir: &Path) -> PathBuf {
+        let dir_str = dir.to_str().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main", dir_str])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", dir_str, "commit", "--allow-empty", "-m", "initial commit"])
+            .output()
+            .unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// Set up a dwm directory for a real git repo.
+    fn setup_dwm_dir_git(tmp: &Path, repo_name: &str, main_repo: &Path) -> PathBuf {
+        let dwm_base = tmp.join("dwm");
+        let rd = dwm_base.join(repo_name);
+        fs::create_dir_all(&rd).unwrap();
+        fs::write(
+            rd.join(".main-repo"),
+            main_repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        fs::write(rd.join(".vcs-type"), "git").unwrap();
+        dwm_base
+    }
+
+    #[test]
+    fn e2e_git_list_entries_main_only() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = setup_dwm_dir_git(tmp.path(), "myrepo", &main_repo);
+
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base,
+        };
+
+        let entries = list_workspace_entries_inner(&deps).unwrap();
+        assert_eq!(entries.len(), 1, "should have main worktree entry");
+        assert!(entries[0].is_main);
+        assert_eq!(entries[0].name, "main-worktree");
+        assert_eq!(entries[0].path, main_repo);
+        assert_eq!(entries[0].description, "initial commit");
+    }
+
+    #[test]
+    fn e2e_git_list_entries_with_worktree() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = setup_dwm_dir_git(tmp.path(), "myrepo", &main_repo);
+
+        // Create a git worktree in the dwm directory
+        let ws_path = dwm_base.join("myrepo/feat-branch");
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                main_repo.to_str().unwrap(),
+                "worktree",
+                "add",
+                ws_path.to_str().unwrap(),
+                "-b",
+                "feat-branch",
+            ])
+            .output()
+            .unwrap();
+
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base,
+        };
+
+        let entries = list_workspace_entries_inner(&deps).unwrap();
+        assert!(
+            entries.len() >= 2,
+            "should have main + worktree, got {}",
+            entries.len()
+        );
+
+        let main_entry = entries.iter().find(|e| e.is_main).unwrap();
+        assert_eq!(main_entry.name, "main-worktree");
+        assert_eq!(main_entry.path, main_repo);
+
+        let feat_entry = entries.iter().find(|e| e.name == "feat-branch").unwrap();
+        assert!(!feat_entry.is_main);
+        assert!(feat_entry.path.ends_with("feat-branch"));
+        assert!(feat_entry.bookmarks.contains(&"feat-branch".to_string()));
+    }
+
+    #[test]
+    fn e2e_git_new_and_delete_workspace() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = tmp.path().join("dwm");
+
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create a workspace
+        new_workspace_inner(&deps, Some("test-ws".to_string()), None).unwrap();
+        let ws_dir = dwm_base.join("myrepo/test-ws");
+        assert!(ws_dir.exists(), "workspace dir should exist after creation");
+
+        // List and verify it shows up
+        let backend2 = crate::git::GitBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        let entries = list_workspace_entries_inner(&deps2).unwrap();
+        assert!(
+            entries.iter().any(|e| e.name == "test-ws"),
+            "test-ws should appear in listing"
+        );
+
+        // Delete the workspace
+        let backend3 = crate::git::GitBackend;
+        let deps3 = WorkspaceDeps {
+            backend: Box::new(backend3),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        delete_workspace_inner(&deps3, Some("test-ws".to_string())).unwrap();
+        assert!(
+            !ws_dir.exists(),
+            "workspace dir should be removed after deletion"
+        );
+
+        // Verify it's gone from listing
+        let backend4 = crate::git::GitBackend;
+        let deps4 = WorkspaceDeps {
+            backend: Box::new(backend4),
+            cwd: main_repo,
+            dwm_base,
+        };
+        let entries = list_workspace_entries_inner(&deps4).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "test-ws"),
+            "test-ws should not appear after deletion"
+        );
+    }
+
+    #[test]
+    fn e2e_git_worktree_with_changes() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = tmp.path().join("dwm");
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create workspace and make a commit in it
+        new_workspace_inner(&deps, Some("feature".to_string()), None).unwrap();
+        let ws_dir = dwm_base.join("myrepo/feature");
+
+        // Add a file and commit in the worktree
+        fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
+        let ws_str = ws_dir.to_str().unwrap();
+        std::process::Command::new("git")
+            .args(["-C", ws_str, "add", "hello.txt"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", ws_str, "commit", "-m", "add hello"])
+            .output()
+            .unwrap();
+
+        // List and check that the feature workspace has diff stats
+        let backend2 = crate::git::GitBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo,
+            dwm_base,
+        };
+        let entries = list_workspace_entries_inner(&deps2).unwrap();
+        let feat = entries.iter().find(|e| e.name == "feature").unwrap();
+        assert_eq!(feat.description, "add hello");
+        assert!(
+            feat.diff_stat.insertions > 0 || feat.diff_stat.files_changed > 0,
+            "feature workspace should show changes vs trunk"
+        );
+    }
+
+    #[test]
+    fn e2e_git_rename_workspace() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_git_repo(&repo_path);
+
+        let dwm_base = tmp.path().join("dwm");
+        let backend = crate::git::GitBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create workspace
+        new_workspace_inner(&deps, Some("old-name".to_string()), None).unwrap();
+        let old_path = dwm_base.join("myrepo/old-name");
+        assert!(old_path.exists());
+
+        // Rename it
+        let backend2 = crate::git::GitBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
+
+        assert!(!old_path.exists(), "old dir should be gone");
+        assert!(
+            dwm_base.join("myrepo/new-name").exists(),
+            "new dir should exist"
+        );
+
+        // Verify listing shows the new name
+        let backend3 = crate::git::GitBackend;
+        let deps3 = WorkspaceDeps {
+            backend: Box::new(backend3),
+            cwd: main_repo,
+            dwm_base,
+        };
+        let entries = list_workspace_entries_inner(&deps3).unwrap();
+        assert!(entries.iter().any(|e| e.name == "new-name"));
+        assert!(!entries.iter().any(|e| e.name == "old-name"));
     }
 }

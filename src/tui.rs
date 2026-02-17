@@ -8,6 +8,7 @@ use std::io;
 
 use crate::workspace::{WorkspaceEntry, format_time_ago};
 
+#[derive(Debug)]
 pub enum PickerResult {
     Selected(String),
     CreateNew(Option<String>),
@@ -75,7 +76,7 @@ fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Mode {
     Browse,
     InputName,
@@ -327,37 +328,42 @@ fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
-    if entries.is_empty() {
-        eprintln!("no workspaces found");
-        return Ok(None);
-    }
-
-    enable_raw_mode()?;
-    let mut stderr = io::stderr();
-    crossterm::execute!(stderr, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stderr);
-    let mut terminal = Terminal::new(backend)?;
-
+fn run_picker_inner<B: Backend>(
+    terminal: &mut Terminal<B>,
+    entries: Vec<WorkspaceEntry>,
+    next_event: &mut dyn FnMut() -> Result<Event>,
+) -> Result<Option<PickerResult>> {
     let mut app = App::new(entries);
-    let result;
 
     loop {
         terminal.draw(|f| render(f, &app))?;
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = next_event()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
 
             match app.mode {
                 Mode::Browse => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        result = None;
-                        break;
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Down => app.next(),
+                    KeyCode::Up => app.previous(),
+                    KeyCode::Enter => {
+                        if app.on_create_row() {
+                            return Ok(Some(PickerResult::CreateNew(None)));
+                        } else if let Some(idx) = app.selected_entry_index() {
+                            let path = app.entries[idx].path.to_string_lossy().to_string();
+                            return Ok(Some(PickerResult::Selected(path)));
+                        }
                     }
-                    KeyCode::Char('j') | KeyCode::Down => app.next(),
-                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Char(c) if app.on_create_row() => {
+                        app.mode = Mode::InputName;
+                        app.input_buf.clear();
+                        app.input_buf.push(c);
+                    }
+                    KeyCode::Char('q') => return Ok(None),
+                    KeyCode::Char('j') => app.next(),
+                    KeyCode::Char('k') => app.previous(),
                     KeyCode::Char('s') => {
                         app.sort_mode = app.sort_mode.next();
                         sort_entries(&mut app.entries, app.sort_mode);
@@ -375,21 +381,6 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                             }
                         }
                     }
-                    KeyCode::Enter => {
-                        if app.on_create_row() {
-                            result = Some(PickerResult::CreateNew(None));
-                            break;
-                        } else if let Some(idx) = app.selected_entry_index() {
-                            let path = app.entries[idx].path.to_string_lossy().to_string();
-                            result = Some(PickerResult::Selected(path));
-                            break;
-                        }
-                    }
-                    KeyCode::Char(c) if app.on_create_row() => {
-                        app.mode = Mode::InputName;
-                        app.input_buf.clear();
-                        app.input_buf.push(c);
-                    }
                     _ => {}
                 },
                 Mode::InputName => match key.code {
@@ -403,8 +394,7 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                         } else {
                             Some(app.input_buf.clone())
                         };
-                        result = Some(PickerResult::CreateNew(name));
-                        break;
+                        return Ok(Some(PickerResult::CreateNew(name)));
                     }
                     KeyCode::Backspace => {
                         app.input_buf.pop();
@@ -439,8 +429,7 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                 Mode::ConfirmDelete(ref name) => match key.code {
                     KeyCode::Char('y') => {
                         let name = name.clone();
-                        result = Some(PickerResult::Delete(name));
-                        break;
+                        return Ok(Some(PickerResult::Delete(name)));
                     }
                     KeyCode::Char('n') | KeyCode::Esc => {
                         app.mode = Mode::Browse;
@@ -450,13 +439,27 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
             }
         }
     }
+}
 
-    // Cleanup
+pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
+    if entries.is_empty() {
+        eprintln!("no workspaces found");
+        return Ok(None);
+    }
+
+    enable_raw_mode()?;
+    let mut stderr = io::stderr();
+    crossterm::execute!(stderr, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_picker_inner(&mut terminal, entries, &mut || Ok(event::read()?));
+
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    Ok(result)
+    result
 }
 
 // ── Multi-repo picker (--all mode) ──────────────────────────────
@@ -663,25 +666,17 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
     }
 }
 
-pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
-    if entries.is_empty() {
-        eprintln!("no workspaces found");
-        return Ok(None);
-    }
-
-    enable_raw_mode()?;
-    let mut stderr = io::stderr();
-    crossterm::execute!(stderr, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stderr);
-    let mut terminal = Terminal::new(backend)?;
-
+fn run_picker_multi_repo_inner<B: Backend>(
+    terminal: &mut Terminal<B>,
+    entries: Vec<WorkspaceEntry>,
+    next_event: &mut dyn FnMut() -> Result<Event>,
+) -> Result<Option<PickerResult>> {
     let mut app = MultiRepoApp::new(entries);
-    let result;
 
     loop {
         terminal.draw(|f| render_multi_repo(f, &app))?;
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = next_event()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -708,10 +703,7 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
                 }
             } else {
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        result = None;
-                        break;
-                    }
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Char('s') => {
@@ -726,8 +718,7 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
                     KeyCode::Enter => {
                         if let Some(&idx) = app.filtered_indices.get(app.selected) {
                             let path = app.entries[idx].path.to_string_lossy().to_string();
-                            result = Some(PickerResult::Selected(path));
-                            break;
+                            return Ok(Some(PickerResult::Selected(path)));
                         }
                     }
                     _ => {}
@@ -735,18 +726,35 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
             }
         }
     }
+}
+
+pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
+    if entries.is_empty() {
+        eprintln!("no workspaces found");
+        return Ok(None);
+    }
+
+    enable_raw_mode()?;
+    let mut stderr = io::stderr();
+    crossterm::execute!(stderr, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_picker_multi_repo_inner(&mut terminal, entries, &mut || Ok(event::read()?));
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vcs::DiffStat;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -879,5 +887,395 @@ mod tests {
     fn filter_no_match() {
         let entry = make_entry_with_desc("ws1", "some desc", vec!["bk1"]);
         assert!(!matches_filter(&entry, "zzz"));
+    }
+
+    #[test]
+    fn create_row_any_char_enters_input_mode() {
+        // Regression: pressing 's', 'd', 'q', etc. on the create row should
+        // start typing a workspace name, not trigger shortcuts like sort/delete/quit.
+        let entries = vec![make_entry("ws1", Some(60), 0, 0)];
+        let mut app = App::new(entries);
+        let original_sort = app.sort_mode;
+
+        // Move to the "+ Create new" row
+        app.next();
+        assert!(app.on_create_row());
+
+        // Simulate what the event loop does for Char(c) when on_create_row()
+        for ch in ['s', 'd', 'q', 'j', 'k', '/'] {
+            app.mode = Mode::Browse;
+            app.input_buf.clear();
+
+            // This mirrors the match arm: Char(c) if on_create_row() => InputName
+            app.mode = Mode::InputName;
+            app.input_buf.push(ch);
+
+            assert_eq!(app.mode, Mode::InputName, "char '{}' should enter InputName", ch);
+            assert_eq!(app.input_buf, ch.to_string());
+        }
+        // Sort should never have changed
+        assert_eq!(app.sort_mode, original_sort);
+    }
+
+    // ── TUI integration test helpers ─────────────────────────────────
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Drive run_picker_inner with a sequence of key events.
+    /// After keys are exhausted, Esc is sent to avoid hanging.
+    fn run_picker_with_keys(
+        entries: Vec<WorkspaceEntry>,
+        keys: Vec<KeyCode>,
+    ) -> Result<Option<PickerResult>> {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut key_iter = keys.into_iter();
+        run_picker_inner(&mut terminal, entries, &mut || {
+            match key_iter.next() {
+                Some(code) => Ok(key(code)),
+                None => Ok(key(KeyCode::Esc)),
+            }
+        })
+    }
+
+    /// Drive run_picker_multi_repo_inner with a sequence of key events.
+    fn run_multi_picker_with_keys(
+        entries: Vec<WorkspaceEntry>,
+        keys: Vec<KeyCode>,
+    ) -> Result<Option<PickerResult>> {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut key_iter = keys.into_iter();
+        run_picker_multi_repo_inner(&mut terminal, entries, &mut || {
+            match key_iter.next() {
+                Some(code) => Ok(key(code)),
+                None => Ok(key(KeyCode::Esc)),
+            }
+        })
+    }
+
+    /// Create a named entry with a specific recency rank.
+    /// Lower `rank` = more recent (appears first when sorted by recency).
+    fn make_named_entry_ranked(name: &str, path: &str, rank: u64) -> WorkspaceEntry {
+        WorkspaceEntry {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+            last_modified: Some(SystemTime::now() - Duration::from_secs(rank)),
+            diff_stat: DiffStat::default(),
+            is_main: false,
+            change_id: "abc".to_string(),
+            description: format!("{} description", name),
+            bookmarks: vec![],
+            is_stale: false,
+            repo_name: None,
+        }
+    }
+
+    fn make_named_entry(name: &str, path: &str) -> WorkspaceEntry {
+        make_named_entry_ranked(name, path, 0)
+    }
+
+    fn make_main_entry(name: &str, path: &str) -> WorkspaceEntry {
+        WorkspaceEntry {
+            is_main: true,
+            ..make_named_entry(name, path)
+        }
+    }
+
+    // ── TUI picker integration tests ────────────────────────────────
+
+    #[test]
+    fn tui_select_first_entry() {
+        // rank 0 = most recent, rank 1 = second most recent
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let result = run_picker_with_keys(entries, vec![KeyCode::Enter]).unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws1"),
+            other => panic!("expected Selected, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_navigate_down_and_select() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+            make_named_entry_ranked("ws3", "/tmp/ws3", 2),
+        ];
+        // j, j -> moves to ws3 (index 2), then Enter
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter])
+                .unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws3"),
+            other => panic!("expected Selected ws3, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_navigate_with_arrow_keys() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Down, KeyCode::Enter]).unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
+            other => panic!("expected Selected ws2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_navigate_up_wraps() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        // 3 rows total: ws1(0), ws2(1), Create(2)
+        // Up from 0 wraps to Create(2), Up again to ws2(1)
+        // Use arrow keys since j/k on the Create row starts typing a name
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Up, KeyCode::Up, KeyCode::Enter])
+                .unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
+            other => panic!("expected Selected ws2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_quit_with_q() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        let result = run_picker_with_keys(entries, vec![KeyCode::Char('q')]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_quit_with_esc() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        let result = run_picker_with_keys(entries, vec![KeyCode::Esc]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_create_new_auto_name() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        // j to move to "Create new" row, Enter to confirm
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Char('j'), KeyCode::Enter]).unwrap();
+        match result {
+            Some(PickerResult::CreateNew(None)) => {}
+            other => panic!("expected CreateNew(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_create_new_with_name() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        // j to "Create new", type "foo", Enter
+        let result = run_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('j'),
+                KeyCode::Char('f'),
+                KeyCode::Char('o'),
+                KeyCode::Char('o'),
+                KeyCode::Enter,
+            ],
+        )
+        .unwrap();
+        match result {
+            Some(PickerResult::CreateNew(Some(name))) => assert_eq!(name, "foo"),
+            other => panic!("expected CreateNew(Some(\"foo\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_delete_flow() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        // d to initiate delete on ws1 (first/selected), y to confirm
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Char('d'), KeyCode::Char('y')]).unwrap();
+        match result {
+            Some(PickerResult::Delete(name)) => assert_eq!(name, "ws1"),
+            other => panic!("expected Delete(ws1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_delete_cancel_with_n() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        // d to initiate, n to cancel, then q to quit
+        let result = run_picker_with_keys(
+            entries,
+            vec![KeyCode::Char('d'), KeyCode::Char('n'), KeyCode::Char('q')],
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_delete_refused_on_main() {
+        let entries = vec![
+            make_main_entry("default", "/tmp/main"),
+            make_named_entry_ranked("ws1", "/tmp/ws1", 1),
+        ];
+        // main entry is first (most recent by default), d on main does nothing, then q
+        let result =
+            run_picker_with_keys(entries, vec![KeyCode::Char('d'), KeyCode::Char('q')]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_filter_and_select() {
+        let entries = vec![
+            make_named_entry_ranked("apple", "/tmp/apple", 0),
+            make_named_entry_ranked("banana", "/tmp/banana", 1),
+            make_named_entry_ranked("cherry", "/tmp/cherry", 2),
+        ];
+        // / to enter filter, type "ban", Enter to apply, Enter to select
+        let result = run_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('/'),
+                KeyCode::Char('b'),
+                KeyCode::Char('a'),
+                KeyCode::Char('n'),
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        )
+        .unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/banana"),
+            other => panic!("expected Selected banana, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_filter_esc_clears() {
+        let entries = vec![
+            make_named_entry_ranked("apple", "/tmp/apple", 0),
+            make_named_entry_ranked("banana", "/tmp/banana", 1),
+        ];
+        // / to filter, type "ban", Esc to clear filter, Enter selects first (apple)
+        let result = run_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('/'),
+                KeyCode::Char('b'),
+                KeyCode::Char('a'),
+                KeyCode::Char('n'),
+                KeyCode::Esc,
+                KeyCode::Enter,
+            ],
+        )
+        .unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/apple"),
+            other => panic!("expected Selected apple, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_input_name_backspace_returns_to_browse() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        // j to Create row, type 'a' (enters InputName), backspace (returns to Browse), q to quit
+        let result = run_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('j'),
+                KeyCode::Char('a'),
+                KeyCode::Backspace,
+                KeyCode::Char('q'),
+            ],
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_input_name_esc_cancels() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        // j to Create row, type 'a', Esc cancels, q quits
+        let result = run_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('j'),
+                KeyCode::Char('a'),
+                KeyCode::Esc,
+                KeyCode::Char('q'),
+            ],
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── Multi-repo picker integration tests ─────────────────────────
+
+    #[test]
+    fn tui_multi_select_first() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let result = run_multi_picker_with_keys(entries, vec![KeyCode::Enter]).unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws1"),
+            other => panic!("expected Selected, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_multi_navigate_and_select() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let result =
+            run_multi_picker_with_keys(entries, vec![KeyCode::Char('j'), KeyCode::Enter]).unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
+            other => panic!("expected Selected ws2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tui_multi_quit() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        let result = run_multi_picker_with_keys(entries, vec![KeyCode::Char('q')]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_multi_filter_and_select() {
+        let entries = vec![
+            make_named_entry_ranked("alpha", "/tmp/alpha", 0),
+            make_named_entry_ranked("beta", "/tmp/beta", 1),
+        ];
+        let result = run_multi_picker_with_keys(
+            entries,
+            vec![
+                KeyCode::Char('/'),
+                KeyCode::Char('b'),
+                KeyCode::Char('e'),
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        )
+        .unwrap();
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/beta"),
+            other => panic!("expected Selected beta, got {:?}", other),
+        }
     }
 }

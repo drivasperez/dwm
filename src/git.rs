@@ -155,6 +155,21 @@ impl VcsBackend for GitBackend {
         Ok(())
     }
 
+    fn workspace_rename(
+        &self,
+        repo_dir: &Path,
+        old_path: &Path,
+        new_path: &Path,
+        _old_name: &str,
+        _new_name: &str,
+        _change_id: &str,
+    ) -> Result<()> {
+        let old_str = old_path.to_string_lossy();
+        let new_str = new_path.to_string_lossy();
+        run_git_in(repo_dir, &["worktree", "move", &old_str, &new_str])?;
+        Ok(())
+    }
+
     fn diff_stat_vs_trunk(
         &self,
         _repo_dir: &Path,
