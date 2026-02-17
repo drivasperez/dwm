@@ -193,10 +193,10 @@ pub fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
 fn parse_diff_stat(output: &str) -> Result<DiffStat> {
     // The last line looks like: "3 files changed, 10 insertions(+), 5 deletions(-)"
     // or just "0 files changed"
-    if let Some(last_line) = output.lines().last() {
-        if let Some(stat) = parse_diff_stat_line(last_line) {
-            return Ok(stat);
-        }
+    if let Some(last_line) = output.lines().last()
+        && let Some(stat) = parse_diff_stat_line(last_line)
+    {
+        return Ok(stat);
     }
     Ok(DiffStat::default())
 }
@@ -211,15 +211,15 @@ fn parse_diff_stat_line(line: &str) -> Option<DiffStat> {
     for part in line.split(',') {
         let part = part.trim();
         let tokens: Vec<&str> = part.split_whitespace().collect();
-        if tokens.len() >= 2 {
-            if let Ok(n) = tokens[0].parse::<u32>() {
-                if tokens[1].starts_with("file") {
-                    stat.files_changed = n;
-                } else if tokens[1].starts_with("insertion") {
-                    stat.insertions = n;
-                } else if tokens[1].starts_with("deletion") {
-                    stat.deletions = n;
-                }
+        if tokens.len() >= 2
+            && let Ok(n) = tokens[0].parse::<u32>()
+        {
+            if tokens[1].starts_with("file") {
+                stat.files_changed = n;
+            } else if tokens[1].starts_with("insertion") {
+                stat.insertions = n;
+            } else if tokens[1].starts_with("deletion") {
+                stat.deletions = n;
             }
         }
     }

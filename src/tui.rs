@@ -216,7 +216,9 @@ fn render(frame: &mut Frame, app: &App) {
     // Render help bar at bottom
     if area.height > 3 {
         let help_text = if app.mode == Mode::InputName {
-            " Enter: create (empty = auto-name)  Esc: cancel"
+            " Enter: create  Esc: cancel"
+        } else if app.on_create_row() {
+            " Enter: create (auto-name)  type: name it  q: quit"
         } else {
             " j/k: navigate  Enter: select  q: quit"
         };
@@ -260,19 +262,25 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Enter => {
                         if app.on_create_row() {
-                            app.mode = Mode::InputName;
-                            app.input_buf.clear();
+                            result = Some(PickerResult::CreateNew(None));
+                            break;
                         } else {
                             let path = app.entries[app.selected].path.to_string_lossy().to_string();
                             result = Some(PickerResult::Selected(path));
                             break;
                         }
                     }
+                    KeyCode::Char(c) if app.on_create_row() => {
+                        app.mode = Mode::InputName;
+                        app.input_buf.clear();
+                        app.input_buf.push(c);
+                    }
                     _ => {}
                 },
                 Mode::InputName => match key.code {
                     KeyCode::Esc => {
                         app.mode = Mode::Browse;
+                        app.input_buf.clear();
                     }
                     KeyCode::Enter => {
                         let name = if app.input_buf.trim().is_empty() {
@@ -285,6 +293,9 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
                     }
                     KeyCode::Backspace => {
                         app.input_buf.pop();
+                        if app.input_buf.is_empty() {
+                            app.mode = Mode::Browse;
+                        }
                     }
                     KeyCode::Char(c) => {
                         app.input_buf.push(c);

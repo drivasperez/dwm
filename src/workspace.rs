@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{jj, names};
 
@@ -21,7 +21,7 @@ fn main_repo_path(repo_name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path.trim()))
 }
 
-fn ensure_repo_dir(repo_name: &str, main_repo_root: &PathBuf) -> Result<PathBuf> {
+fn ensure_repo_dir(repo_name: &str, main_repo_root: &Path) -> Result<PathBuf> {
     let dir = repo_dir(repo_name)?;
     fs::create_dir_all(&dir)?;
     let main_repo_file = dir.join(".main-repo");
