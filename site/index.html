@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dwm — a workspace manager for jj and git</title>
+  <meta name="description"
+    content="dwm is a TUI workspace manager for jj (Jujutsu VCS) and git. It creates, lists, and deletes workspaces with an interactive picker.">
+  <style>
+    @font-face {
+      font-family: "Berkeley Mono";
+      src: url("fonts/BerkeleyMonoVariable-Regular.woff2") format("woff2-variations");
+      font-style: normal;
+      font-weight: 100 700;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Berkeley Mono";
+      src: url("fonts/BerkeleyMonoVariable-Italic.woff2") format("woff2-variations");
+      font-style: italic;
+      font-weight: 100 700;
+      font-display: swap;
+    }
+
+    :root {
+      --fg: hsl(0, 0%, 10%);
+      --bg: hsl(60, 100%, 99%);
+      --dim: hsl(0, 0%, 33%);
+      --accent: hsl(0, 0%, 10%);
+      --code-bg: hsl(50, 20%, 93%);
+      --border: hsl(0, 0%, 80%);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: hsl(0, 0%, 83%);
+        --bg: hsl(0, 0%, 10%);
+        --dim: hsl(0, 0%, 60%);
+        --accent: hsl(0, 0%, 83%);
+        --code-bg: hsl(0, 0%, 16%);
+        --border: hsl(0, 0%, 27%);
+      }
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: "Berkeley Mono", "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      line-height: 1.3;
+      color: var(--fg);
+      background: var(--bg);
+      max-width: 72ch;
+      padding: 2rem 1.5rem;
+      font-weight: 100;
+    }
+
+    h1 {
+      font-size: 14px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 1.5rem;
+    }
+
+    h2 {
+      font-size: 14px;
+      font-weight: bold;
+      margin-top: 2rem;
+      margin-bottom: 0.75rem;
+    }
+
+    p {
+      margin-bottom: 0.75rem;
+    }
+
+    a {
+      color: var(--fg);
+    }
+
+    code {
+      background: var(--code-bg);
+      padding: 0.1em 0.3em;
+      font-family: inherit;
+      font-size: inherit;
+    }
+
+    pre {
+      background: var(--code-bg);
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.75rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+    }
+
+    .dim {
+      color: var(--dim);
+    }
+
+    .section {
+      margin-bottom: 1.5rem;
+    }
+
+    dl {
+      margin-bottom: 0.75rem;
+    }
+
+    dt {
+      font-weight: bold;
+    }
+
+    dd {
+      margin-left: 2ch;
+      margin-bottom: 0.5rem;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2rem 0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>dwm(1) <span class="dim">— workspace manager</span></h1>
+
+  <div class="section">
+    <h2>NAME</h2>
+    <p>
+      dwm — a TUI workspace manager for
+      <a href="https://martinvonz.github.io/jj/">jj</a> and
+      <a href="https://git-scm.com/">git</a>
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>DESCRIPTION</h2>
+    <p>
+      Suddenly everyone is building multi-agentic workflows on top of
+      git worktrees, and there are a lot of apps to manage them. Most
+      of them do too much, and they don't support jj workspaces.
+      Here is mine, which aims to do as little as possible while remaining
+      useful.
+    </p>
+    <p>
+      dwm (pronounced "doom") creates, lists, and deletes workspaces
+      stored under <code>~/.dwm/&lt;repo&gt;/</code>, with a shell wrapper that
+      auto-<code>cd</code>s into the selected workspace. It works with
+      both jj and git repositories.
+    </p>
+    <p>
+      It provides an interactive TUI picker for browsing and switching
+      between workspaces, with filtering, sorting, and inline deletion.
+    </p>
+    <p>
+      My workflow looks like this: <code>dwm new</code> to create and move
+      to the new worktree, and then `claude` to open my coding assistant of
+      choice. Once my changes are done, I run `dwm delete` to clear up
+      the worktree. If I'm switching between long-lived tasks, I use
+      <code>dwm list</code> to see my open workspaces.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>INSTALL</h2>
+
+    <p>Shell installer (macOS and Linux):</p>
+    <pre><code>curl --proto '=https' --tlsv1.2 -LsSf
+        https://github.com/drivasperez/dwm/releases/download/v{{VERSION}}/dwm-installer.sh | sh</code></pre>
+
+    <p>Homebrew:</p>
+    <pre><code>brew install drivasperez/tap/dwm</code></pre>
+
+    <p>Cargo:</p>
+    <pre><code>cargo install dwm</code></pre>
+
+    <p>
+      Pre-built binaries are available on the
+      <a href="https://github.com/drivasperez/dwm/releases/latest">latest GitHub release</a>.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>SHELL SETUP</h2>
+    <p>Add to your shell config (<code>.bashrc</code>, <code>.zshrc</code>, etc.):</p>
+    <pre><code>eval "$(dwm shell-setup)"</code></pre>
+    <p>
+      This wraps the <code>dwm</code> binary so that selecting a workspace
+      automatically <code>cd</code>s into it.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>USAGE</h2>
+    <dl>
+      <dt>dwm new [name]</dt>
+      <dd>Create a workspace (name auto-generated if omitted)</dd>
+
+      <dt>dwm new --at &lt;rev&gt;</dt>
+      <dd>Create a workspace starting from a specific revision</dd>
+
+      <dt>dwm list</dt>
+      <dd>Interactive TUI picker to switch workspaces</dd>
+
+      <dt>dwm list --all</dt>
+      <dd>Multi-repo dashboard across all repos</dd>
+
+      <dt>dwm status</dt>
+      <dd>Non-interactive workspace summary</dd>
+
+      <dt>dwm rename &lt;old&gt; &lt;new&gt;</dt>
+      <dd>Rename a workspace</dd>
+
+      <dt>dwm delete [name]</dt>
+      <dd>Delete a workspace (current one if omitted)</dd>
+    </dl>
+  </div>
+
+  <div class="section">
+    <h2>FEATURES</h2>
+    <p>
+      <strong>Git and jj support</strong> — works with both git and jj
+      repositories.
+    </p>
+    <p>
+      <strong>Interactive TUI picker</strong> — browse and switch workspaces
+      with a full-featured table view. Filter by typing, cycle sort modes,
+      and delete workspaces inline.
+    </p>
+    <p>
+      <strong>Multi-repo dashboard</strong> — <code>dwm list --all</code>
+      shows workspaces across all repos.
+    </p>
+    <p>
+      <strong>Stale workspace detection</strong> — flags workspaces that
+      are merged or older than 30 days.
+    </p>
+    <p>
+      <strong>Auto-generated names</strong> — random adjective-noun names
+      when you don't specify one.
+    </p>
+  </div>
+
+  <hr>
+
+  <p class="dim">
+    dwm {{VERSION}} —
+    <a href="https://github.com/drivasperez/dwm">source</a> —
+    <a href="https://github.com/drivasperez/dwm/releases/latest">releases</a>
+  </p>
+
+</body>
+
+</html>
