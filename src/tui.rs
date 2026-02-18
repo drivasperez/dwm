@@ -910,7 +910,12 @@ mod tests {
             app.mode = Mode::InputName;
             app.input_buf.push(ch);
 
-            assert_eq!(app.mode, Mode::InputName, "char '{}' should enter InputName", ch);
+            assert_eq!(
+                app.mode,
+                Mode::InputName,
+                "char '{}' should enter InputName",
+                ch
+            );
             assert_eq!(app.input_buf, ch.to_string());
         }
         // Sort should never have changed
@@ -932,11 +937,9 @@ mod tests {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
-        run_picker_inner(&mut terminal, entries, &mut || {
-            match key_iter.next() {
-                Some(code) => Ok(key(code)),
-                None => Ok(key(KeyCode::Esc)),
-            }
+        run_picker_inner(&mut terminal, entries, &mut || match key_iter.next() {
+            Some(code) => Ok(key(code)),
+            None => Ok(key(KeyCode::Esc)),
         })
     }
 
@@ -948,11 +951,9 @@ mod tests {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
-        run_picker_multi_repo_inner(&mut terminal, entries, &mut || {
-            match key_iter.next() {
-                Some(code) => Ok(key(code)),
-                None => Ok(key(KeyCode::Esc)),
-            }
+        run_picker_multi_repo_inner(&mut terminal, entries, &mut || match key_iter.next() {
+            Some(code) => Ok(key(code)),
+            None => Ok(key(KeyCode::Esc)),
         })
     }
 
@@ -1008,9 +1009,11 @@ mod tests {
             make_named_entry_ranked("ws3", "/tmp/ws3", 2),
         ];
         // j, j -> moves to ws3 (index 2), then Enter
-        let result =
-            run_picker_with_keys(entries, vec![KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter])
-                .unwrap();
+        let result = run_picker_with_keys(
+            entries,
+            vec![KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter],
+        )
+        .unwrap();
         match result {
             Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws3"),
             other => panic!("expected Selected ws3, got {:?}", other),
@@ -1023,8 +1026,7 @@ mod tests {
             make_named_entry_ranked("ws1", "/tmp/ws1", 0),
             make_named_entry_ranked("ws2", "/tmp/ws2", 1),
         ];
-        let result =
-            run_picker_with_keys(entries, vec![KeyCode::Down, KeyCode::Enter]).unwrap();
+        let result = run_picker_with_keys(entries, vec![KeyCode::Down, KeyCode::Enter]).unwrap();
         match result {
             Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
             other => panic!("expected Selected ws2, got {:?}", other),
@@ -1041,8 +1043,7 @@ mod tests {
         // Up from 0 wraps to Create(2), Up again to ws2(1)
         // Use arrow keys since j/k on the Create row starts typing a name
         let result =
-            run_picker_with_keys(entries, vec![KeyCode::Up, KeyCode::Up, KeyCode::Enter])
-                .unwrap();
+            run_picker_with_keys(entries, vec![KeyCode::Up, KeyCode::Up, KeyCode::Enter]).unwrap();
         match result {
             Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
             other => panic!("expected Selected ws2, got {:?}", other),

@@ -108,7 +108,11 @@ fn latest_description(dir: &Path, workspace_name: &str) -> String {
     match result {
         Ok(text) => {
             let trimmed = text.trim().to_string();
-            if trimmed.is_empty() { String::new() } else { trimmed }
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                trimmed
+            }
         }
         Err(_) => String::new(),
     }
@@ -131,20 +135,24 @@ impl VcsBackend for JjBackend {
 
     fn repo_name_from(&self, dir: &Path) -> Result<String> {
         let root = self.root_from(dir)?;
-        let name = root
-            .file_name()
-            .context("repo root has no directory name")?
-            .to_string_lossy()
-            .to_string();
-        Ok(name)
+        Ok(crate::vcs::repo_dir_name(&root))
     }
 
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>> {
-        let out = run_jj_in(repo_dir, &["workspace", "list", "-T", workspace_list_template()])?;
+        let out = run_jj_in(
+            repo_dir,
+            &["workspace", "list", "-T", workspace_list_template()],
+        )?;
         parse_workspace_info(&out)
     }
 
-    fn workspace_add(&self, repo_dir: &Path, ws_path: &Path, name: &str, at: Option<&str>) -> Result<()> {
+    fn workspace_add(
+        &self,
+        repo_dir: &Path,
+        ws_path: &Path,
+        name: &str,
+        at: Option<&str>,
+    ) -> Result<()> {
         let path_str = ws_path.to_string_lossy();
         let mut args = vec!["workspace", "add", "--name", name, &path_str];
         if let Some(rev) = at {
@@ -191,12 +199,7 @@ impl VcsBackend for JjBackend {
         diff_stat(repo_dir, "trunk()", &to)
     }
 
-    fn latest_description(
-        &self,
-        repo_dir: &Path,
-        _worktree_dir: &Path,
-        ws_name: &str,
-    ) -> String {
+    fn latest_description(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> String {
         latest_description(repo_dir, ws_name)
     }
 
@@ -206,7 +209,10 @@ impl VcsBackend for JjBackend {
         } else {
             format!("trunk()..{}@", ws_name)
         };
-        match run_jj_in(repo_dir, &["log", "-r", &revset, "--no-graph", "-T", "commit_id"]) {
+        match run_jj_in(
+            repo_dir,
+            &["log", "-r", &revset, "--no-graph", "-T", "commit_id"],
+        ) {
             Ok(out) => out.trim().is_empty(),
             Err(_) => false,
         }
@@ -227,7 +233,8 @@ mod tests {
 
     #[test]
     fn parse_workspace_info_basic() {
-        let output = "default\0abc12345\0fix login bug\0main,dev\0\nfeature\0def67890\0add tests\0\0\n";
+        let output =
+            "default\0abc12345\0fix login bug\0main,dev\0\nfeature\0def67890\0add tests\0\0\n";
         let result = parse_workspace_info(output).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, "default");

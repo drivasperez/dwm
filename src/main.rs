@@ -21,7 +21,9 @@ fn main() -> Result<()> {
         Commands::List { all } => {
             if all {
                 let entries = workspace::list_all_workspace_entries()?;
-                if let Some(tui::PickerResult::Selected(path)) = tui::run_picker_multi_repo(entries)? {
+                if let Some(tui::PickerResult::Selected(path)) =
+                    tui::run_picker_multi_repo(entries)?
+                {
                     println!("{}", path);
                 }
                 return Ok(());

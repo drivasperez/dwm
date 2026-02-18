@@ -35,10 +35,7 @@ mod tests {
             fn_str.starts_with("dwm() {"),
             "must define a dwm() shell function"
         );
-        assert!(
-            fn_str.ends_with('}'),
-            "must close the function body"
-        );
+        assert!(fn_str.ends_with('}'), "must close the function body");
     }
 
     #[test]

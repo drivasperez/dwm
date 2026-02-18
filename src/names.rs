@@ -2,19 +2,19 @@ use rand::seq::IndexedRandom;
 use std::path::Path;
 
 const ADJECTIVES: &[&str] = &[
-    "amber", "bold", "calm", "dark", "eager", "fair", "glad", "hazy", "icy", "jade",
-    "keen", "lush", "mild", "neat", "opal", "pale", "quick", "rosy", "soft", "tidy",
-    "vast", "warm", "zany", "aqua", "blue", "crisp", "dusty", "ember", "fresh", "gold",
-    "happy", "ivory", "jolly", "kind", "lazy", "merry", "noble", "olive", "plum", "quiet",
-    "rapid", "sage", "tall", "ultra", "vivid", "wise", "young", "zen", "agile", "brave",
+    "amber", "bold", "calm", "dark", "eager", "fair", "glad", "hazy", "icy", "jade", "keen",
+    "lush", "mild", "neat", "opal", "pale", "quick", "rosy", "soft", "tidy", "vast", "warm",
+    "zany", "aqua", "blue", "crisp", "dusty", "ember", "fresh", "gold", "happy", "ivory", "jolly",
+    "kind", "lazy", "merry", "noble", "olive", "plum", "quiet", "rapid", "sage", "tall", "ultra",
+    "vivid", "wise", "young", "zen", "agile", "brave",
 ];
 
 const NOUNS: &[&str] = &[
-    "ant", "bat", "cat", "dog", "elk", "fox", "gnu", "hawk", "ibis", "jay",
-    "koi", "lynx", "mole", "newt", "owl", "puma", "quail", "ram", "seal", "toad",
-    "vole", "wolf", "yak", "crab", "dart", "eel", "frog", "goat", "hare", "inca",
-    "koala", "lamb", "mink", "narwhal", "orca", "panda", "raven", "swan", "tiger", "urchin",
-    "viper", "wren", "zebra", "bear", "crow", "dove", "egret", "finch", "gull", "heron",
+    "ant", "bat", "cat", "dog", "elk", "fox", "gnu", "hawk", "ibis", "jay", "koi", "lynx", "mole",
+    "newt", "owl", "puma", "quail", "ram", "seal", "toad", "vole", "wolf", "yak", "crab", "dart",
+    "eel", "frog", "goat", "hare", "inca", "koala", "lamb", "mink", "narwhal", "orca", "panda",
+    "raven", "swan", "tiger", "urchin", "viper", "wren", "zebra", "bear", "crow", "dove", "egret",
+    "finch", "gull", "heron",
 ];
 
 pub fn generate_name() -> String {

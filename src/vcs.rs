@@ -15,17 +15,30 @@ pub struct DiffStat {
     pub deletions: u32,
 }
 
+fn hash_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let mut h: u32 = 2166136261; // FNV-1a offset basis
+    for b in s.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619); // FNV prime
+    }
+    format!("{:08x}", h)
+}
+
+pub fn repo_dir_name(root: &Path) -> String {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{}-{}", name, hash_path(root))
+}
+
 pub trait VcsBackend {
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
 
     fn repo_name_from(&self, dir: &Path) -> Result<String> {
         let root = self.root_from(dir)?;
-        let name = root
-            .file_name()
-            .context("repo root has no directory name")?
-            .to_string_lossy()
-            .to_string();
-        Ok(name)
+        Ok(repo_dir_name(&root))
     }
 
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>>;
@@ -188,6 +201,26 @@ mod tests {
         assert_eq!(stat.files_changed, 2);
         assert_eq!(stat.insertions, 5);
         assert_eq!(stat.deletions, 3);
+    }
+
+    #[test]
+    fn repo_dir_name_same_path_is_stable() {
+        let path = std::path::Path::new("/home/user/projects/myrepo");
+        assert_eq!(repo_dir_name(path), repo_dir_name(path));
+    }
+
+    #[test]
+    fn repo_dir_name_starts_with_basename() {
+        let path = std::path::Path::new("/home/user/myrepo");
+        let dir_name = repo_dir_name(path);
+        assert!(dir_name.starts_with("myrepo-"), "dir_name: {}", dir_name);
+    }
+
+    #[test]
+    fn repo_dir_name_differs_for_same_basename_different_paths() {
+        let path_a = std::path::Path::new("/work/a/myrepo");
+        let path_b = std::path::Path::new("/work/b/myrepo");
+        assert_ne!(repo_dir_name(path_a), repo_dir_name(path_b));
     }
 
     #[test]

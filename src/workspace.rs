@@ -303,7 +303,11 @@ fn infer_workspace_name_from_cwd(deps: &WorkspaceDeps) -> Result<String> {
 }
 
 /// Returns the path the shell should cd to if cwd was inside the renamed workspace.
-fn rename_workspace_inner(deps: &WorkspaceDeps, old_name: &str, new_name: &str) -> Result<Option<PathBuf>> {
+fn rename_workspace_inner(
+    deps: &WorkspaceDeps,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Option<PathBuf>> {
     let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
         let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
         relative
@@ -554,7 +558,14 @@ fn list_all_workspace_entries_inner(dwm_base: &Path) -> Result<Vec<WorkspaceEntr
             continue;
         }
 
-        let repo_name = dir_entry.file_name().to_string_lossy().to_string();
+        let main_repo_content = match fs::read_to_string(&main_repo_file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let repo_name = Path::new(main_repo_content.trim())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir_entry.file_name().to_string_lossy().into_owned());
 
         let backend = match vcs::detect_from_dwm_dir(&repo_path) {
             Ok(b) => b,
@@ -873,10 +884,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         // Create a workspace subdir
-        let ws_dir = dwm_base.join("myrepo/feat-x");
+        let ws_dir = dwm_base.join(format!("{}/feat-x", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let workspaces = vec![
@@ -926,7 +938,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let workspaces = vec![(
             "default".to_string(),
@@ -979,6 +992,7 @@ mod tests {
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
         let dwm_base = tmp.path().join("dwm");
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -999,7 +1013,7 @@ mod tests {
                 at,
             } => {
                 assert_eq!(repo_dir, &main_repo);
-                assert_eq!(ws_path, &dwm_base.join("myrepo/my-ws"));
+                assert_eq!(ws_path, &dwm_base.join(format!("{}/my-ws", dir_name)));
                 assert_eq!(name, "my-ws");
                 assert!(at.is_none());
             }
@@ -1068,10 +1082,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         // Create the workspace dir to be deleted
-        let ws_dir = dwm_base.join("myrepo/my-ws");
+        let ws_dir = dwm_base.join(format!("{}/my-ws", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1083,7 +1098,10 @@ mod tests {
         };
 
         let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string())).unwrap();
-        assert!(redirect.is_none(), "should not redirect when cwd is outside workspace");
+        assert!(
+            redirect.is_none(),
+            "should not redirect when cwd is outside workspace"
+        );
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1109,9 +1127,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/my-ws");
+        let ws_dir = dwm_base.join(format!("{}/my-ws", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1132,9 +1151,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/inferred-ws");
+        let ws_dir = dwm_base.join(format!("{}/inferred-ws", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1161,7 +1181,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1181,9 +1202,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/old-name");
+        let ws_dir = dwm_base.join(format!("{}/old-name", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1194,11 +1216,14 @@ mod tests {
         };
 
         let redirect = rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
-        assert!(redirect.is_none(), "should not redirect when cwd is outside workspace");
+        assert!(
+            redirect.is_none(),
+            "should not redirect when cwd is outside workspace"
+        );
 
         // Old dir gone, new dir exists
         assert!(!ws_dir.exists());
-        assert!(dwm_base.join("myrepo/new-name").exists());
+        assert!(dwm_base.join(format!("{}/new-name", dir_name)).exists());
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1218,9 +1243,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/old-name");
+        let ws_dir = dwm_base.join(format!("{}/old-name", dir_name));
         fs::create_dir_all(ws_dir.join("src")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo, vec![]);
@@ -1234,7 +1260,10 @@ mod tests {
         let redirect = rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
         // cwd was old-name/src, so redirect should be new-name/src
-        assert_eq!(redirect, dwm_base.join("myrepo/new-name/src"));
+        assert_eq!(
+            redirect,
+            dwm_base.join(format!("{}/new-name/src", dir_name))
+        );
     }
 
     #[test]
@@ -1242,9 +1271,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/old-name");
+        let ws_dir = dwm_base.join(format!("{}/old-name", dir_name));
         fs::create_dir_all(ws_dir.join("src")).unwrap();
         fs::write(ws_dir.join("src/main.rs"), "fn main() {}").unwrap();
         fs::write(ws_dir.join("README.md"), "# hello").unwrap();
@@ -1258,7 +1288,7 @@ mod tests {
 
         rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
 
-        let new_dir = dwm_base.join("myrepo/new-name");
+        let new_dir = dwm_base.join(format!("{}/new-name", dir_name));
         assert!(new_dir.join("src/main.rs").exists());
         assert_eq!(
             fs::read_to_string(new_dir.join("src/main.rs")).unwrap(),
@@ -1275,7 +1305,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1293,10 +1324,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        fs::create_dir_all(dwm_base.join("myrepo/old-name")).unwrap();
-        fs::create_dir_all(dwm_base.join("myrepo/new-name")).unwrap();
+        fs::create_dir_all(dwm_base.join(format!("{}/old-name", dir_name))).unwrap();
+        fs::create_dir_all(dwm_base.join(format!("{}/new-name", dir_name))).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1314,7 +1346,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1334,10 +1367,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         // Create a workspace dir
-        let ws_dir = dwm_base.join("myrepo/feat-x");
+        let ws_dir = dwm_base.join(format!("{}/feat-x", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1356,7 +1390,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1375,7 +1410,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1395,9 +1431,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
-        let ws_dir = dwm_base.join("myrepo/old-name");
+        let ws_dir = dwm_base.join(format!("{}/old-name", dir_name));
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo, vec![]);
@@ -1415,7 +1452,7 @@ mod tests {
         // Now do the rename
         let redirect = rename_workspace_inner(&deps, &old, "new-name").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
-        assert_eq!(redirect, dwm_base.join("myrepo/new-name"));
+        assert_eq!(redirect, dwm_base.join(format!("{}/new-name", dir_name)));
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1433,7 +1470,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&main_repo).unwrap();
-        let dwm_base = setup_dwm_dir(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         // cwd is outside dwm
@@ -1449,6 +1487,23 @@ mod tests {
             "error: {}",
             err
         );
+    }
+
+    // ── regression: same basename, different paths get distinct dwm dirs ──
+
+    #[test]
+    fn same_basename_different_paths_get_distinct_dir_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("team-a/myrepo");
+        let repo_b = tmp.path().join("team-b/myrepo");
+        let dir_a = vcs::repo_dir_name(&repo_a);
+        let dir_b = vcs::repo_dir_name(&repo_b);
+        assert_ne!(
+            dir_a, dir_b,
+            "two repos with same basename but different paths must not collide"
+        );
+        assert!(dir_a.starts_with("myrepo-"), "dir_a: {}", dir_a);
+        assert!(dir_b.starts_with("myrepo-"), "dir_b: {}", dir_b);
     }
 
     // ── list_all_workspace_entries_inner tests ─────────────────────
@@ -1634,7 +1689,14 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", dir_str, "commit", "--allow-empty", "-m", "initial commit"])
+            .args([
+                "-C",
+                dir_str,
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial commit",
+            ])
             .output()
             .unwrap();
         dir.canonicalize().unwrap()
@@ -1645,11 +1707,7 @@ mod tests {
         let dwm_base = tmp.join("dwm");
         let rd = dwm_base.join(repo_name);
         fs::create_dir_all(&rd).unwrap();
-        fs::write(
-            rd.join(".main-repo"),
-            main_repo.to_string_lossy().as_ref(),
-        )
-        .unwrap();
+        fs::write(rd.join(".main-repo"), main_repo.to_string_lossy().as_ref()).unwrap();
         fs::write(rd.join(".vcs-type"), "git").unwrap();
         dwm_base
     }
@@ -1661,8 +1719,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_git(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_git(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::git::GitBackend;
         let deps = WorkspaceDeps {
@@ -1686,11 +1744,11 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_git(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_git(tmp.path(), &dir_name, &main_repo);
 
         // Create a git worktree in the dwm directory
-        let ws_path = dwm_base.join("myrepo/feat-branch");
+        let ws_path = dwm_base.join(format!("{}/feat-branch", dir_name));
         std::process::Command::new("git")
             .args([
                 "-C",
@@ -1735,6 +1793,7 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let dwm_base = tmp.path().join("dwm");
 
@@ -1747,7 +1806,7 @@ mod tests {
 
         // Create a workspace
         new_workspace_inner(&deps, Some("test-ws".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/test-ws");
+        let ws_dir = dwm_base.join(format!("{}/test-ws", dir_name));
         assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
         // List and verify it shows up
@@ -1797,6 +1856,7 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let dwm_base = tmp.path().join("dwm");
         let backend = crate::git::GitBackend;
@@ -1808,7 +1868,7 @@ mod tests {
 
         // Create workspace and make a commit in it
         new_workspace_inner(&deps, Some("feature".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/feature");
+        let ws_dir = dwm_base.join(format!("{}/feature", dir_name));
 
         // Add a file and commit in the worktree
         fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
@@ -1845,6 +1905,7 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let dwm_base = tmp.path().join("dwm");
         let backend = crate::git::GitBackend;
@@ -1856,7 +1917,7 @@ mod tests {
 
         // Create workspace
         new_workspace_inner(&deps, Some("old-name".to_string()), None).unwrap();
-        let old_path = dwm_base.join("myrepo/old-name");
+        let old_path = dwm_base.join(format!("{}/old-name", dir_name));
         assert!(old_path.exists());
 
         // Rename it
@@ -1870,7 +1931,7 @@ mod tests {
 
         assert!(!old_path.exists(), "old dir should be gone");
         assert!(
-            dwm_base.join("myrepo/new-name").exists(),
+            dwm_base.join(format!("{}/new-name", dir_name)).exists(),
             "new dir should exist"
         );
 
@@ -1893,6 +1954,7 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let dwm_base = tmp.path().join("dwm");
         let backend = crate::git::GitBackend;
@@ -1904,7 +1966,7 @@ mod tests {
 
         // Create workspace with a subdirectory
         new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
-        let ws_path = dwm_base.join("myrepo/my-ws");
+        let ws_path = dwm_base.join(format!("{}/my-ws", dir_name));
         let subdir = ws_path.join("src");
         fs::create_dir_all(&subdir).unwrap();
 
@@ -1917,10 +1979,13 @@ mod tests {
         };
         let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
-        assert_eq!(redirect, dwm_base.join("myrepo/renamed-ws/src"));
+        assert_eq!(
+            redirect,
+            dwm_base.join(format!("{}/renamed-ws/src", dir_name))
+        );
 
         // The new path should exist and contain the subdirectory
-        let new_ws = dwm_base.join("myrepo/renamed-ws");
+        let new_ws = dwm_base.join(format!("{}/renamed-ws", dir_name));
         assert!(new_ws.exists());
         assert!(new_ws.join("src").exists());
     }
@@ -1941,7 +2006,15 @@ mod tests {
             .unwrap();
         // Create a "main" bookmark so trunk() resolves
         std::process::Command::new("jj")
-            .args(["--repository", dir_str, "bookmark", "create", "main", "-r", "@-"])
+            .args([
+                "--repository",
+                dir_str,
+                "bookmark",
+                "create",
+                "main",
+                "-r",
+                "@-",
+            ])
             .output()
             .unwrap();
         dir.canonicalize().unwrap()
@@ -1951,11 +2024,7 @@ mod tests {
         let dwm_base = tmp.join("dwm");
         let rd = dwm_base.join(repo_name);
         fs::create_dir_all(&rd).unwrap();
-        fs::write(
-            rd.join(".main-repo"),
-            main_repo.to_string_lossy().as_ref(),
-        )
-        .unwrap();
+        fs::write(rd.join(".main-repo"), main_repo.to_string_lossy().as_ref()).unwrap();
         fs::write(rd.join(".vcs-type"), "jj").unwrap();
         dwm_base
     }
@@ -1967,8 +2036,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -1991,11 +2060,11 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         // Create a jj workspace in the dwm directory
-        let ws_path = dwm_base.join("myrepo/feat-ws");
+        let ws_path = dwm_base.join(format!("{}/feat-ws", dir_name));
         std::process::Command::new("jj")
             .args([
                 "--repository",
@@ -2039,8 +2108,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2051,7 +2120,7 @@ mod tests {
 
         // Create a workspace
         new_workspace_inner(&deps, Some("test-ws".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/test-ws");
+        let ws_dir = dwm_base.join(format!("{}/test-ws", dir_name));
         assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
         // List and verify it shows up
@@ -2101,8 +2170,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2113,7 +2182,7 @@ mod tests {
 
         // Create workspace and make changes in it
         new_workspace_inner(&deps, Some("feature".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/feature");
+        let ws_dir = dwm_base.join(format!("{}/feature", dir_name));
 
         // Add a file (jj auto-tracks new files)
         fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
@@ -2148,8 +2217,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2160,7 +2229,7 @@ mod tests {
 
         // Create workspace
         new_workspace_inner(&deps, Some("old-name".to_string()), None).unwrap();
-        let old_path = dwm_base.join("myrepo/old-name");
+        let old_path = dwm_base.join(format!("{}/old-name", dir_name));
         assert!(old_path.exists());
 
         // Rename it
@@ -2174,7 +2243,7 @@ mod tests {
 
         assert!(!old_path.exists(), "old dir should be gone");
         assert!(
-            dwm_base.join("myrepo/new-name").exists(),
+            dwm_base.join(format!("{}/new-name", dir_name)).exists(),
             "new dir should exist"
         );
 
@@ -2197,8 +2266,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2228,8 +2297,8 @@ mod tests {
         };
         rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
 
-        assert!(!dwm_base.join("myrepo/my-ws").exists());
-        assert!(dwm_base.join("myrepo/renamed-ws").exists());
+        assert!(!dwm_base.join(format!("{}/my-ws", dir_name)).exists());
+        assert!(dwm_base.join(format!("{}/renamed-ws", dir_name)).exists());
 
         // Verify listing shows the new name
         let backend3 = crate::jj::JjBackend;
@@ -2250,6 +2319,7 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
 
         let dwm_base = tmp.path().join("dwm");
         let backend = crate::git::GitBackend;
@@ -2261,7 +2331,7 @@ mod tests {
 
         // Create a workspace
         new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/switch-target");
+        let ws_dir = dwm_base.join(format!("{}/switch-target", dir_name));
 
         // Switch to it
         let backend2 = crate::git::GitBackend;
@@ -2291,8 +2361,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2303,7 +2373,7 @@ mod tests {
 
         // Create a workspace
         new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
-        let ws_dir = dwm_base.join("myrepo/switch-target");
+        let ws_dir = dwm_base.join(format!("{}/switch-target", dir_name));
 
         // Switch to it
         let backend2 = crate::jj::JjBackend;
@@ -2333,8 +2403,8 @@ mod tests {
         let repo_path = tmp.path().join("repos/myrepo");
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
-
-        let dwm_base = setup_dwm_dir_jj(tmp.path(), "myrepo", &main_repo);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
 
         let backend = crate::jj::JjBackend;
         let deps = WorkspaceDeps {
@@ -2345,7 +2415,7 @@ mod tests {
 
         // Create workspace with a subdirectory
         new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
-        let ws_path = dwm_base.join("myrepo/my-ws");
+        let ws_path = dwm_base.join(format!("{}/my-ws", dir_name));
         let subdir = ws_path.join("src");
         fs::create_dir_all(&subdir).unwrap();
 
@@ -2358,10 +2428,13 @@ mod tests {
         };
         let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
-        assert_eq!(redirect, dwm_base.join("myrepo/renamed-ws/src"));
+        assert_eq!(
+            redirect,
+            dwm_base.join(format!("{}/renamed-ws/src", dir_name))
+        );
 
         // The new path should exist and contain the subdirectory
-        let new_ws = dwm_base.join("myrepo/renamed-ws");
+        let new_ws = dwm_base.join(format!("{}/renamed-ws", dir_name));
         assert!(new_ws.exists());
         assert!(new_ws.join("src").exists());
     }
