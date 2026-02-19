@@ -17,6 +17,7 @@ const NOUNS: &[&str] = &[
     "finch", "gull", "heron",
 ];
 
+/// Generate a random `adjective-noun` workspace name.
 pub fn generate_name() -> String {
     let mut rng = rand::rng();
     let adj = ADJECTIVES.choose(&mut rng).unwrap();
@@ -24,6 +25,8 @@ pub fn generate_name() -> String {
     format!("{adj}-{noun}")
 }
 
+/// Generate a random `adjective-noun` name that does not already exist as a
+/// subdirectory of `dir`.
 pub fn generate_unique(dir: &Path) -> String {
     loop {
         let name = generate_name();

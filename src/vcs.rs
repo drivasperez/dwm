@@ -1,13 +1,19 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
+/// VCS-level metadata for a single workspace/worktree as reported by the
+/// underlying VCS (jj or git).
 #[derive(Debug, Default, Clone)]
 pub struct WorkspaceInfo {
+    /// Short change/commit id (8 hex chars).
     pub change_id: String,
+    /// Commit message of the workspace's current revision.
     pub description: String,
+    /// Branch or bookmark names pointing at this revision.
     pub bookmarks: Vec<String>,
 }
 
+/// Parsed summary line from `jj diff --stat` or `git diff --stat`.
 #[derive(Debug, Default, Clone)]
 pub struct DiffStat {
     pub files_changed: u32,
@@ -15,6 +21,8 @@ pub struct DiffStat {
     pub deletions: u32,
 }
 
+/// Compute a short FNV-1a hex hash of a path string, used to disambiguate
+/// repos that share the same directory basename.
 fn hash_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     let mut h: u32 = 2166136261; // FNV-1a offset basis
@@ -25,6 +33,10 @@ fn hash_path(path: &Path) -> String {
     format!("{:08x}", h)
 }
 
+/// Build the `~/.dwm/` sub-directory name for a repo.
+///
+/// The name is `<basename>-<8-char-hash>` so that two repos with the same
+/// directory name but different paths get distinct dwm directories.
 pub fn repo_dir_name(root: &Path) -> String {
     let name = root
         .file_name()
@@ -33,15 +45,21 @@ pub fn repo_dir_name(root: &Path) -> String {
     format!("{}-{}", name, hash_path(root))
 }
 
+/// Abstraction over jj and git that workspace operations are delegated to.
 pub trait VcsBackend {
+    /// Return the repository root given any directory inside the repo.
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
 
+    /// Return the dwm directory name for the repo that contains `dir`.
     fn repo_name_from(&self, dir: &Path) -> Result<String> {
         let root = self.root_from(dir)?;
         Ok(repo_dir_name(&root))
     }
 
+    /// List all workspaces/worktrees known to the VCS, returning `(name, info)` pairs.
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>>;
+    /// Create a new workspace/worktree at `ws_path` with the given `name`.
+    /// `at` optionally specifies the starting revision.
     fn workspace_add(
         &self,
         repo_dir: &Path,
@@ -49,6 +67,7 @@ pub trait VcsBackend {
         name: &str,
         at: Option<&str>,
     ) -> Result<()>;
+    /// Remove the workspace/worktree from VCS tracking and delete its directory.
     fn workspace_remove(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()>;
     /// Rename a workspace: update VCS metadata and move the directory.
     /// `old_path` and `new_path` are the workspace directories on disk.
@@ -61,15 +80,24 @@ pub trait VcsBackend {
         new_name: &str,
     ) -> Result<()>;
 
+    /// Return the diff stat between `trunk()` / main branch and the workspace's
+    /// current revision.
     fn diff_stat_vs_trunk(
         &self,
         repo_dir: &Path,
         worktree_dir: &Path,
         ws_name: &str,
     ) -> Result<DiffStat>;
+    /// Return the most recent non-empty commit description reachable from the
+    /// workspace's head. Falls back to an empty string if none is found.
     fn latest_description(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> String;
+    /// Return `true` if the workspace's changes have already been merged into
+    /// the trunk branch (i.e. no un-merged commits exist).
     fn is_merged_into_trunk(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> bool;
+    /// Short identifier for the VCS (e.g. `"jj"` or `"git"`).
     fn vcs_name(&self) -> &'static str;
+    /// Name of the primary workspace that lives in the original repo directory
+    /// (e.g. `"default"` for jj, `"main-worktree"` for git).
     fn main_workspace_name(&self) -> &'static str;
 }
 
@@ -113,6 +141,8 @@ pub fn detect_from_dwm_dir(repo_dir: &Path) -> Result<Box<dyn VcsBackend>> {
     }
 }
 
+/// Parse the full output of `jj diff --stat` or `git diff --stat`, extracting
+/// the summary line at the end.
 pub fn parse_diff_stat(output: &str) -> Result<DiffStat> {
     if let Some(last_line) = output.lines().last()
         && let Some(stat) = parse_diff_stat_line(last_line)
@@ -122,6 +152,9 @@ pub fn parse_diff_stat(output: &str) -> Result<DiffStat> {
     Ok(DiffStat::default())
 }
 
+/// Parse a single diff summary line such as
+/// `"3 files changed, 10 insertions(+), 5 deletions(-)"`.
+/// Returns `None` if the line does not look like a summary line.
 pub fn parse_diff_stat_line(line: &str) -> Option<DiffStat> {
     let line = line.trim();
     if !line.contains("file") {

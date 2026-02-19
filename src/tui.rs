@@ -8,13 +8,18 @@ use std::io;
 
 use crate::workspace::{WorkspaceEntry, format_time_ago};
 
+/// The action chosen by the user in the interactive workspace picker.
 #[derive(Debug)]
 pub enum PickerResult {
+    /// User selected an existing workspace; value is the workspace path.
     Selected(String),
+    /// User wants to create a new workspace with an optional explicit name.
     CreateNew(Option<String>),
+    /// User wants to delete the named workspace.
     Delete(String),
 }
 
+/// Column by which the workspace table is sorted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SortMode {
     Recency,
@@ -23,6 +28,7 @@ enum SortMode {
 }
 
 impl SortMode {
+    /// Cycle to the next sort mode.
     fn next(self) -> Self {
         match self {
             SortMode::Recency => SortMode::Name,
@@ -31,6 +37,7 @@ impl SortMode {
         }
     }
 
+    /// Short label shown in the help bar (e.g. `"recency"`, `"name"`).
     fn label(self) -> &'static str {
         match self {
             SortMode::Recency => "recency",
@@ -40,6 +47,8 @@ impl SortMode {
     }
 }
 
+/// Return `true` if `entry` matches the filter `query` (case-insensitive).
+/// Matches against workspace name, description, and bookmark names.
 fn matches_filter(entry: &WorkspaceEntry, query: &str) -> bool {
     let query = query.to_lowercase();
     entry.name.to_lowercase().contains(&query)
@@ -50,6 +59,7 @@ fn matches_filter(entry: &WorkspaceEntry, query: &str) -> bool {
             .any(|b| b.to_lowercase().contains(&query))
 }
 
+/// Sort `entries` in-place according to `mode`.
 fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
     match mode {
         SortMode::Name => {
@@ -76,25 +86,37 @@ fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
     }
 }
 
+/// Current interaction mode of the single-repo picker.
 #[derive(Debug, PartialEq)]
 enum Mode {
+    /// Normal navigation.
     Browse,
+    /// User is typing a name for a new workspace.
     InputName,
+    /// User is typing a filter string.
     Filter,
+    /// Waiting for y/n confirmation before deleting the named workspace.
     ConfirmDelete(String),
 }
 
+/// State for the single-repo interactive picker.
 struct App {
     entries: Vec<WorkspaceEntry>,
+    /// Index into [`filtered_indices`] (not into `entries` directly).
     selected: usize,
     mode: Mode,
+    /// Buffer for the new-workspace name being typed.
     input_buf: String,
     sort_mode: SortMode,
+    /// Live filter string.
     filter_buf: String,
+    /// Indices into `entries` that survive the current filter.
     filtered_indices: Vec<usize>,
 }
 
 impl App {
+    /// Create a new [`App`], sorting entries by recency and computing the
+    /// initial (unfiltered) index list.
     fn new(mut entries: Vec<WorkspaceEntry>) -> Self {
         let sort_mode = SortMode::Recency;
         sort_entries(&mut entries, sort_mode);
@@ -110,6 +132,7 @@ impl App {
         }
     }
 
+    /// Return only the entries that pass the current filter, in display order.
     fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
         self.filtered_indices
             .iter()
@@ -117,18 +140,23 @@ impl App {
             .collect()
     }
 
+    /// Total number of selectable rows including the "+ Create new" sentinel row.
     fn total_rows(&self) -> usize {
         self.filtered_indices.len() + 1 // +1 for "Create new" row
     }
 
+    /// Return `true` when the cursor is on the "+ Create new" row.
     fn on_create_row(&self) -> bool {
         self.selected == self.filtered_indices.len()
     }
 
+    /// Return the index into `entries` for the currently selected row, or
+    /// `None` when the cursor is on the "+ Create new" row.
     fn selected_entry_index(&self) -> Option<usize> {
         self.filtered_indices.get(self.selected).copied()
     }
 
+    /// Move the cursor down one row (wrapping).
     fn next(&mut self) {
         let total = self.total_rows();
         if total > 0 {
@@ -136,6 +164,7 @@ impl App {
         }
     }
 
+    /// Move the cursor up one row (wrapping).
     fn previous(&mut self) {
         let total = self.total_rows();
         if total > 0 {
@@ -143,6 +172,7 @@ impl App {
         }
     }
 
+    /// Recompute `filtered_indices` after `filter_buf` has changed.
     fn recompute_filter(&mut self) {
         if self.filter_buf.is_empty() {
             self.filtered_indices = (0..self.entries.len()).collect();
@@ -161,6 +191,7 @@ impl App {
     }
 }
 
+/// Render the single-repo workspace table and help bar into `frame`.
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
@@ -328,6 +359,8 @@ fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Event loop for the single-repo picker. `next_event` is injectable for
+/// testing (pass a closure that returns synthetic key events).
 fn run_picker_inner<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: Vec<WorkspaceEntry>,
@@ -441,6 +474,10 @@ fn run_picker_inner<B: Backend>(
     }
 }
 
+/// Launch the interactive TUI workspace picker for a single repo.
+///
+/// Switches the terminal to an alternate screen in raw mode, runs the event
+/// loop, then restores the terminal before returning.
 pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
         eprintln!("no workspaces found");
@@ -464,16 +501,19 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
 
 // ── Multi-repo picker (--all mode) ──────────────────────────────
 
+/// State for the multi-repo (`--all`) interactive picker.
 struct MultiRepoApp {
     entries: Vec<WorkspaceEntry>,
     selected: usize,
     sort_mode: SortMode,
     filter_buf: String,
     filtered_indices: Vec<usize>,
+    /// Whether the user is currently typing a filter string.
     filter_mode: bool,
 }
 
 impl MultiRepoApp {
+    /// Create a new [`MultiRepoApp`], sorting entries by recency.
     fn new(mut entries: Vec<WorkspaceEntry>) -> Self {
         let sort_mode = SortMode::Recency;
         sort_entries(&mut entries, sort_mode);
@@ -488,6 +528,7 @@ impl MultiRepoApp {
         }
     }
 
+    /// Return only the entries that pass the current filter, in display order.
     fn visible_entries(&self) -> Vec<&WorkspaceEntry> {
         self.filtered_indices
             .iter()
@@ -495,10 +536,12 @@ impl MultiRepoApp {
             .collect()
     }
 
+    /// Total number of selectable rows.
     fn total_rows(&self) -> usize {
         self.filtered_indices.len()
     }
 
+    /// Move the cursor down one row (wrapping).
     fn next(&mut self) {
         let total = self.total_rows();
         if total > 0 {
@@ -506,6 +549,7 @@ impl MultiRepoApp {
         }
     }
 
+    /// Move the cursor up one row (wrapping).
     fn previous(&mut self) {
         let total = self.total_rows();
         if total > 0 {
@@ -513,6 +557,7 @@ impl MultiRepoApp {
         }
     }
 
+    /// Recompute `filtered_indices` after `filter_buf` has changed.
     fn recompute_filter(&mut self) {
         if self.filter_buf.is_empty() {
             self.filtered_indices = (0..self.entries.len()).collect();
@@ -531,6 +576,7 @@ impl MultiRepoApp {
     }
 }
 
+/// Render the multi-repo workspace table and help bar into `frame`.
 fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
     let area = frame.area();
 
@@ -666,6 +712,7 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
     }
 }
 
+/// Event loop for the multi-repo picker. `next_event` is injectable for testing.
 fn run_picker_multi_repo_inner<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: Vec<WorkspaceEntry>,
@@ -728,6 +775,9 @@ fn run_picker_multi_repo_inner<B: Backend>(
     }
 }
 
+/// Launch the interactive TUI workspace picker showing all repos (`--all` mode).
+///
+/// Returns the selected workspace path, or `None` if the user cancelled.
 pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
         eprintln!("no workspaces found");

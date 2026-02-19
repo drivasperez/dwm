@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
 
+/// Run `git` with the given arguments inside `dir`.
 fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -39,12 +40,16 @@ fn detect_trunk(dir: &Path) -> String {
     "main".to_string()
 }
 
+/// One record from `git worktree list --porcelain`.
 struct WorktreeEntry {
     path: PathBuf,
     head: String,
+    /// Branch name (without `refs/heads/` prefix), or `None` for detached HEAD.
     branch: Option<String>,
 }
 
+/// Parse the porcelain output of `git worktree list --porcelain` into a list
+/// of [`WorktreeEntry`] values. Bare worktrees are silently skipped.
 fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
     let mut entries = Vec::new();
     let mut current_path: Option<PathBuf> = None;
@@ -93,6 +98,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
+/// [`VcsBackend`] implementation that delegates to the `git` CLI via worktrees.
 pub struct GitBackend;
 
 impl VcsBackend for GitBackend {

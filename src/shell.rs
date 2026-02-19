@@ -1,6 +1,9 @@
 use anyhow::Result;
 use std::io::IsTerminal;
 
+/// Returns the POSIX shell function definition that wraps the `dwm` binary.
+/// When the binary prints a directory path to stdout the wrapper `cd`s into it;
+/// otherwise it passes the output through to the caller.
 fn shell_function() -> &'static str {
     r#"dwm() {
     local output
@@ -15,6 +18,10 @@ fn shell_function() -> &'static str {
 }"#
 }
 
+/// Print the shell integration wrapper to stdout.
+///
+/// When stdout is a terminal an additional hint comment is written to stderr
+/// reminding the user to add `eval "$(dwm shell-setup)"` to their rc file.
 pub fn print_shell_setup() -> Result<()> {
     println!("{}", shell_function());
     if std::io::stdout().is_terminal() {

@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
 
+/// Run `jj` with the given arguments in the current working directory.
 fn run_jj(args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
         .args(args)
@@ -16,6 +17,7 @@ fn run_jj(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Run `jj` with the given arguments inside `dir`.
 fn run_jj_in(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
         .args(args)
@@ -29,16 +31,19 @@ fn run_jj_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Return the jj repository root from the current working directory.
 pub fn root() -> Result<PathBuf> {
     let out = run_jj(&["root"])?;
     Ok(PathBuf::from(out.trim()))
 }
 
+/// Return the jj repository root by running `jj root` inside `dir`.
 pub fn root_from(dir: &Path) -> Result<PathBuf> {
     let out = run_jj_in(dir, &["root"])?;
     Ok(PathBuf::from(out.trim()))
 }
 
+/// Return the basename of the current jj repository root directory.
 pub fn repo_name() -> Result<String> {
     let root = root()?;
     let name = root
@@ -49,6 +54,10 @@ pub fn repo_name() -> Result<String> {
     Ok(name)
 }
 
+/// Return the jj template string used with `jj workspace list -T`.
+///
+/// Fields are separated by NUL (`\0`) and records by `\0\n` so that
+/// descriptions containing tabs or newlines are parsed correctly.
 fn workspace_list_template() -> &'static str {
     concat!(
         r#"name ++ "\0" ++ self.target().change_id().shortest(8) ++ "\0""#,
@@ -57,6 +66,8 @@ fn workspace_list_template() -> &'static str {
     )
 }
 
+/// Parse the NUL-delimited output produced by `jj workspace list` with
+/// [`workspace_list_template`] into a list of `(workspace_name, WorkspaceInfo)` pairs.
 fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
     let mut results = Vec::new();
     for record in output.split("\0\n") {
@@ -87,6 +98,9 @@ fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
     Ok(results)
 }
 
+/// Walk the ancestor chain of `workspace_name@` and return the description of
+/// the most recent commit that has a non-empty message. Returns an empty string
+/// when no such ancestor exists or jj returns an error.
 fn latest_description(dir: &Path, workspace_name: &str) -> String {
     let revset = format!(
         r#"latest(ancestors({name}@) & description(glob:"?*"))"#,
@@ -118,6 +132,8 @@ fn latest_description(dir: &Path, workspace_name: &str) -> String {
     }
 }
 
+/// Run `jj diff --stat --from <from> --to <to>` inside `dir` and parse the
+/// result. Returns a zeroed [`DiffStat`] if jj reports an error.
 fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
     let out = run_jj_in(dir, &["diff", "--stat", "--from", from, "--to", to]);
     match out {
@@ -126,6 +142,7 @@ fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
     }
 }
 
+/// [`VcsBackend`] implementation that delegates to the `jj` CLI.
 pub struct JjBackend;
 
 impl VcsBackend for JjBackend {

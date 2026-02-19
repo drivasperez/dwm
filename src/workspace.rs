@@ -6,19 +6,23 @@ use std::time::SystemTime;
 
 use crate::{names, vcs};
 
+/// Return `true` if `cwd` is equal to or a subdirectory of `ws_path`.
 fn is_inside(cwd: &std::path::Path, ws_path: &std::path::Path) -> bool {
     cwd.starts_with(ws_path)
 }
 
+/// Return the path to `~/.dwm/`, the root of all dwm workspace storage.
 fn dwm_base_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join(".dwm"))
 }
 
+/// Return `~/.dwm/<repo_name>` — the per-repo workspace storage directory.
 fn repo_dir(dwm_base: &Path, repo_name: &str) -> PathBuf {
     dwm_base.join(repo_name)
 }
 
+/// Read the original repository root path from `~/.dwm/<repo_name>/.main-repo`.
 fn main_repo_path(dwm_base: &Path, repo_name: &str) -> Result<PathBuf> {
     let repo_dir = repo_dir(dwm_base, repo_name);
     let main_repo_file = repo_dir.join(".main-repo");
@@ -27,6 +31,8 @@ fn main_repo_path(dwm_base: &Path, repo_name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path.trim()))
 }
 
+/// Create `~/.dwm/<repo_name>/` if it does not yet exist, and write the
+/// `.main-repo` and `.vcs-type` marker files on first use.
 fn ensure_repo_dir(
     dwm_base: &Path,
     repo_name: &str,
@@ -46,12 +52,17 @@ fn ensure_repo_dir(
     Ok(dir)
 }
 
+/// Common dependencies threaded through workspace operations, grouped so they
+/// can be injected in tests without touching the real filesystem or VCS.
 struct WorkspaceDeps {
     backend: Box<dyn vcs::VcsBackend>,
     cwd: PathBuf,
     dwm_base: PathBuf,
 }
 
+/// Create a new workspace, auto-detecting the VCS from the current directory.
+///
+/// Prints the new workspace path to stdout so the shell wrapper can `cd` into it.
 pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
@@ -64,6 +75,7 @@ pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
     new_workspace_inner(&deps, name, at)
 }
 
+/// Testable core of [`new_workspace`] that accepts injected [`WorkspaceDeps`].
 fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&str>) -> Result<()> {
     let repo_name = deps.backend.repo_name_from(&deps.cwd)?;
     let root = deps.backend.root_from(&deps.cwd)?;
@@ -191,6 +203,8 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
     }
 }
 
+/// Switch to the named workspace by printing its path to stdout for the shell
+/// wrapper to `cd` into.
 pub fn switch_workspace(name: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
@@ -220,6 +234,8 @@ pub fn switch_workspace(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the path for the named workspace. Returns the path the shell should
+/// `cd` into.
 fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
     let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
         let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
@@ -247,6 +263,8 @@ fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
     Ok(ws_path)
 }
 
+/// Rename a workspace. When `new_name` is `None` the first argument is treated
+/// as the new name and the old name is inferred from the current directory.
 pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
@@ -287,6 +305,10 @@ pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Infer the current workspace name from the current directory path.
+///
+/// Expects `cwd` to be `~/.dwm/<repo>/<workspace>[/…]` and returns the
+/// `<workspace>` component.
 fn infer_workspace_name_from_cwd(deps: &WorkspaceDeps) -> Result<String> {
     if !deps.cwd.starts_with(&deps.dwm_base) {
         bail!(
@@ -360,6 +382,8 @@ fn rename_workspace_inner(
     }
 }
 
+/// Collect [`WorkspaceEntry`] values for all workspaces belonging to the
+/// repository that contains the current directory.
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
@@ -387,6 +411,7 @@ pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     list_workspace_entries_inner(&deps)
 }
 
+/// Testable core of [`list_workspace_entries`].
 fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEntry>> {
     let (repo_name_str, main_repo) = if deps.cwd.starts_with(&deps.dwm_base) {
         let relative = deps.cwd.strip_prefix(&deps.dwm_base)?;
@@ -503,8 +528,10 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     Ok(entries)
 }
 
+/// Number of days of inactivity after which a workspace is considered stale.
 const STALE_DAYS: u64 = 30;
 
+/// All data needed to display a single row in the workspace picker or status output.
 #[derive(Debug)]
 pub struct WorkspaceEntry {
     pub name: String,
@@ -519,6 +546,11 @@ pub struct WorkspaceEntry {
     pub repo_name: Option<String>,
 }
 
+/// Determine whether a workspace should be shown as stale.
+///
+/// A workspace is stale if it has been merged into trunk, or if its last
+/// modification time is more than [`STALE_DAYS`] days in the past. The main
+/// workspace is never considered stale.
 fn compute_is_stale(is_main: bool, is_merged: bool, last_modified: Option<SystemTime>) -> bool {
     if is_main {
         return false;
@@ -534,11 +566,14 @@ fn compute_is_stale(is_main: bool, is_merged: bool, last_modified: Option<System
     false
 }
 
+/// Collect [`WorkspaceEntry`] values for every workspace across all repos
+/// tracked under `~/.dwm/`.
 pub fn list_all_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let dwm_base = dwm_base_dir()?;
     list_all_workspace_entries_inner(&dwm_base)
 }
 
+/// Testable core of [`list_all_workspace_entries`].
 fn list_all_workspace_entries_inner(dwm_base: &Path) -> Result<Vec<WorkspaceEntry>> {
     if !dwm_base.exists() {
         return Ok(Vec::new());
@@ -594,6 +629,9 @@ fn list_all_workspace_entries_inner(dwm_base: &Path) -> Result<Vec<WorkspaceEntr
     Ok(all_entries)
 }
 
+/// Format a [`SystemTime`] as a human-readable relative age string such as
+/// `"5m ago"`, `"3h ago"`, or `"2mo ago"`. Returns `"unknown"` when `time`
+/// is `None` or when the elapsed time cannot be computed.
 pub fn format_time_ago(time: Option<SystemTime>) -> String {
     let Some(time) = time else {
         return "unknown".to_string();
@@ -621,6 +659,7 @@ pub fn format_time_ago(time: Option<SystemTime>) -> String {
     format!("{}mo ago", months)
 }
 
+/// Print a non-interactive tabular workspace summary to stderr.
 pub fn print_status(entries: &[WorkspaceEntry]) {
     let mut out = std::io::stderr().lock();
     // Column widths
