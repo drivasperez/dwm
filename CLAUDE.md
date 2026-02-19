@@ -45,4 +45,4 @@ Every bug fix should include a regression test. New parsing functions and utilit
 
 ## Documentation
 
-When adding new features, subcommands, or changing existing behavior, keep `README.md` up to date with the changes.
+When adding new features, subcommands, or changing existing behavior, keep both `README.md` and `site/index.html` up to date with the changes.

@@ -63,7 +63,7 @@ struct WorkspaceDeps {
 /// Create a new workspace, auto-detecting the VCS from the current directory.
 ///
 /// Prints the new workspace path to stdout so the shell wrapper can `cd` into it.
-pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
+pub fn new_workspace(name: Option<String>, at: Option<&str>, from: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
     let dwm_base = dwm_base_dir()?;
@@ -72,14 +72,33 @@ pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
         cwd,
         dwm_base,
     };
-    new_workspace_inner(&deps, name, at)
+    new_workspace_inner(&deps, name, at, from)
 }
 
 /// Testable core of [`new_workspace`] that accepts injected [`WorkspaceDeps`].
-fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&str>) -> Result<()> {
+fn new_workspace_inner(
+    deps: &WorkspaceDeps,
+    name: Option<String>,
+    at: Option<&str>,
+    from: Option<&str>,
+) -> Result<()> {
     let repo_name = deps.backend.repo_name_from(&deps.cwd)?;
     let root = deps.backend.root_from(&deps.cwd)?;
     let dir = ensure_repo_dir(&deps.dwm_base, &repo_name, &root, deps.backend.vcs_type())?;
+
+    // Resolve --from to a change ID by looking up the source workspace.
+    let resolved_at;
+    let at = if let Some(ws_name) = from {
+        let workspaces = deps.backend.workspace_list(&root)?;
+        let (_name, info) = workspaces
+            .iter()
+            .find(|(n, _)| n == ws_name)
+            .with_context(|| format!("workspace '{}' not found", ws_name))?;
+        resolved_at = info.change_id.clone();
+        Some(resolved_at.as_str())
+    } else {
+        at
+    };
 
     let ws_name = match name {
         Some(n) => n,
@@ -1093,7 +1112,7 @@ mod tests {
             dwm_base: dwm_base.clone(),
         };
 
-        new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1127,7 +1146,7 @@ mod tests {
             dwm_base,
         };
 
-        new_workspace_inner(&deps, None, None).unwrap();
+        new_workspace_inner(&deps, None, None, None).unwrap();
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1160,11 +1179,74 @@ mod tests {
         };
 
         // Create workspace once
-        new_workspace_inner(&deps, Some("dup-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap();
 
         // Second attempt should fail
-        let err = new_workspace_inner(&deps, Some("dup-ws".to_string()), None).unwrap_err();
+        let err = new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap_err();
         assert!(err.to_string().contains("already exists"), "error: {}", err);
+    }
+
+    #[test]
+    fn new_workspace_from_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = tmp.path().join("dwm");
+        let dir_name = vcs::repo_dir_name(&main_repo);
+
+        let workspaces = vec![(
+            "source-ws".to_string(),
+            vcs::WorkspaceInfo {
+                change_id: "abc12345".to_string(),
+                description: "some work".to_string(),
+                bookmarks: vec![],
+            },
+        )];
+
+        let (mock, calls) = MockBackend::new(main_repo.clone(), workspaces);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        new_workspace_inner(&deps, Some("forked".to_string()), None, Some("source-ws")).unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::WorkspaceAdd {
+                ws_path, name, at, ..
+            } => {
+                assert_eq!(ws_path, &dwm_base.join(format!("{}/forked", dir_name)));
+                assert_eq!(name, "forked");
+                assert_eq!(at.as_deref(), Some("abc12345"));
+            }
+            other => panic!("expected WorkspaceAdd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn new_workspace_from_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dwm_base = tmp.path().join("dwm");
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let err = new_workspace_inner(&deps, Some("forked".to_string()), None, Some("no-such-ws"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "error should mention not found: {}",
+            err
+        );
     }
 
     // ── delete_workspace_inner tests ─────────────────────────────────
@@ -1902,7 +1984,7 @@ mod tests {
         };
 
         // Create a workspace
-        new_workspace_inner(&deps, Some("test-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/test-ws", dir_name));
         assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
@@ -1964,7 +2046,7 @@ mod tests {
         };
 
         // Create workspace and make a commit in it
-        new_workspace_inner(&deps, Some("feature".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/feature", dir_name));
 
         // Add a file and commit in the worktree
@@ -2013,7 +2095,7 @@ mod tests {
         };
 
         // Create workspace
-        new_workspace_inner(&deps, Some("old-name".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
         let old_path = dwm_base.join(format!("{}/old-name", dir_name));
         assert!(old_path.exists());
 
@@ -2062,7 +2144,7 @@ mod tests {
         };
 
         // Create workspace with a subdirectory
-        new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
         let ws_path = dwm_base.join(format!("{}/my-ws", dir_name));
         let subdir = ws_path.join("src");
         fs::create_dir_all(&subdir).unwrap();
@@ -2216,7 +2298,7 @@ mod tests {
         };
 
         // Create a workspace
-        new_workspace_inner(&deps, Some("test-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/test-ws", dir_name));
         assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
@@ -2278,7 +2360,7 @@ mod tests {
         };
 
         // Create a workspace with spaces in its name
-        new_workspace_inner(&deps, Some("my cool feature".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("my cool feature".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/my cool feature", dir_name));
         assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
@@ -2351,7 +2433,7 @@ mod tests {
         };
 
         // Create workspace and make changes in it
-        new_workspace_inner(&deps, Some("feature".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/feature", dir_name));
 
         // Add a file (jj auto-tracks new files)
@@ -2398,7 +2480,7 @@ mod tests {
         };
 
         // Create workspace
-        new_workspace_inner(&deps, Some("old-name".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
         let old_path = dwm_base.join(format!("{}/old-name", dir_name));
         assert!(old_path.exists());
 
@@ -2447,7 +2529,7 @@ mod tests {
         };
 
         // Create workspace
-        new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
 
         // Make the workspace stale by committing in the default workspace,
         // which advances the operation log past what my-ws has seen.
@@ -2500,7 +2582,7 @@ mod tests {
         };
 
         // Create a workspace
-        new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/switch-target", dir_name));
 
         // Switch to it
@@ -2542,7 +2624,7 @@ mod tests {
         };
 
         // Create a workspace
-        new_workspace_inner(&deps, Some("switch-target".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
         let ws_dir = dwm_base.join(format!("{}/switch-target", dir_name));
 
         // Switch to it
@@ -2584,7 +2666,7 @@ mod tests {
         };
 
         // Create workspace with a subdirectory
-        new_workspace_inner(&deps, Some("my-ws".to_string()), None).unwrap();
+        new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
         let ws_path = dwm_base.join(format!("{}/my-ws", dir_name));
         let subdir = ws_path.join("src");
         fs::create_dir_all(&subdir).unwrap();

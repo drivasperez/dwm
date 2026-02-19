@@ -17,7 +17,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Commands::List { all: false }) {
-        Commands::New { name, at } => workspace::new_workspace(name, at.as_deref()),
+        Commands::New { name, at, from } => {
+            workspace::new_workspace(name, at.as_deref(), from.as_deref())
+        }
         Commands::List { all } => {
             if all {
                 let entries = workspace::list_all_workspace_entries()?;
@@ -36,7 +38,7 @@ fn main() -> Result<()> {
             )? {
                 Some(tui::PickerResult::Selected(path)) => println!("{}", path),
                 Some(tui::PickerResult::CreateNew(name)) => {
-                    workspace::new_workspace(name, None)?;
+                    workspace::new_workspace(name, None, None)?;
                 }
                 None => {}
             }

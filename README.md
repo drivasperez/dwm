@@ -52,6 +52,7 @@ This wraps the `dwm` binary so that selecting a workspace automatically `cd`s in
 ```sh
 dwm new [name]          # create a workspace (name auto-generated if omitted)
 dwm new --at <rev>      # create a workspace starting from a specific revision
+dwm new --from <ws>     # fork from an existing workspace's current change
 dwm list                # interactive TUI picker to switch workspaces
 dwm list --all          # multi-repo dashboard across all repos
 dwm status              # non-interactive workspace summary

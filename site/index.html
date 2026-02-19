@@ -120,6 +120,18 @@
         border: 1px solid var(--border);
       }
 
+      .hello-robot {
+        display: grid;
+        place-items: center;
+      }
+      .hello-robot pre {
+        background: none;
+        border: none;
+        padding: 0px;
+        line-height: 1.2;
+        overflow: hidden;
+      }
+
       .copy-overlay {
         position: relative;
         pointer-events: none;
@@ -275,12 +287,12 @@
         directories automatically. Run <code>dwm shell-setup</code> interactively and it will offer
         to add the wrapper to your shell config automatically:
       </p>
-      <pre><code>dwm shell-setup</code></pre>
+      <pre data-copyable="true"><code>dwm shell-setup</code></pre>
       <p>Or add it manually:</p>
       <p><strong>Bash / Zsh</strong> — add to <code>.bashrc</code> or <code>.zshrc</code>:</p>
-      <pre><code>eval "$(dwm shell-setup)"</code></pre>
+      <pre data-copyable="true"><code>eval "$(dwm shell-setup)"</code></pre>
       <p><strong>Fish</strong> — add to <code>~/.config/fish/config.fish</code>:</p>
-      <pre><code>dwm shell-setup --fish | source</code></pre>
+      <pre data-copyable="true"><code>dwm shell-setup --fish | source</code></pre>
       <p>
         This wraps the <code>dwm</code> binary so that selecting a workspace automatically
         <code>cd</code>s into it.
@@ -295,6 +307,9 @@
 
         <dt>dwm new --at &lt;rev&gt;</dt>
         <dd>Create a workspace starting from a specific revision</dd>
+
+        <dt>dwm new --from &lt;ws&gt;</dt>
+        <dd>Fork from an existing workspace's current change</dd>
 
         <dt>dwm list</dt>
         <dd>Interactive TUI picker to switch workspaces</dd>
@@ -337,6 +352,28 @@
       </p>
     </div>
 
+    <div class="hello-robot">
+      <pre>
+┌──────────────────────────┐
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░Hello░░robot░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░┌┐░░┌┐░░░░░│
+│░░┌┐░░░░░░░░░░░└┘░░└┘░░░░░│
+│░░││░░░░░░░░░░░░░░░░░░░░░░│
+│░░└┘░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░┌─────────────┐░░│
+│░░░░░░░░░│▚▚▚▚▚▚▚▚▚▚▚▚▚│░░│
+│░░░░░░░░░└─────────────┘░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░│
+└──────────────────────────┘
+      </pre>
+    </div>
+
     <hr />
 
     <p class="dim">
@@ -344,7 +381,6 @@
       <a href="https://github.com/drivasperez/dwm">source</a> —
       <a href="https://github.com/drivasperez/dwm/releases/latest">releases</a>
     </p>
-
     <script>
       var COPY_ICON =
         '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h2" stroke="currentColor" stroke-width="1.5"/></svg>copy';
@@ -352,6 +388,7 @@
         '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 8.5l4 4 7-8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>copied';
 
       document.querySelectorAll("pre").forEach(function (pre) {
+        if (!pre.dataset.copyable) return;
         var wrap = document.createElement("div");
         wrap.className = "pre-wrap";
         pre.parentNode.insertBefore(wrap, pre);

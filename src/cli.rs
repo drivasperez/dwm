@@ -14,8 +14,11 @@ pub enum Commands {
         /// Workspace name (auto-generated if omitted)
         name: Option<String>,
         /// Start from a specific revision instead of @
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from")]
         at: Option<String>,
+        /// Fork from an existing workspace's current change
+        #[arg(long, conflicts_with = "at")]
+        from: Option<String>,
     },
     /// List workspaces and pick one interactively
     List {
@@ -100,7 +103,7 @@ mod tests {
     fn new_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "new", "my-ws"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: Some(n), at: None }) if n == "my-ws")
+            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: None }) if n == "my-ws")
         );
     }
 
@@ -108,8 +111,30 @@ mod tests {
     fn new_with_at_flag() {
         let cli = Cli::try_parse_from(["dwm", "new", "--at", "abc123"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: None, at: Some(r) }) if r == "abc123")
+            matches!(cli.command, Some(Commands::New { name: None, at: Some(r), from: None }) if r == "abc123")
         );
+    }
+
+    #[test]
+    fn new_with_from_flag() {
+        let cli = Cli::try_parse_from(["dwm", "new", "--from", "other-ws"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::New { name: None, at: None, from: Some(f) }) if f == "other-ws")
+        );
+    }
+
+    #[test]
+    fn new_with_from_and_name() {
+        let cli = Cli::try_parse_from(["dwm", "new", "my-ws", "--from", "other-ws"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: Some(f) }) if n == "my-ws" && f == "other-ws")
+        );
+    }
+
+    #[test]
+    fn new_at_and_from_conflict() {
+        let err = Cli::try_parse_from(["dwm", "new", "--at", "abc", "--from", "ws"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
