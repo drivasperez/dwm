@@ -50,6 +50,22 @@ fn main() -> Result<()> {
         Commands::Switch { name } => workspace::switch_workspace(&name),
         Commands::Rename { name, new_name } => workspace::rename_workspace(name, new_name),
         Commands::Delete { name } => workspace::delete_workspace(name).map(|_| ()),
-        Commands::ShellSetup => shell::print_shell_setup(),
+        Commands::ShellSetup {
+            posix,
+            bash,
+            zsh,
+            fish,
+        } => {
+            let shell = if fish {
+                Some(shell::Shell::Fish)
+            } else if zsh {
+                Some(shell::Shell::Zsh)
+            } else if posix || bash {
+                Some(shell::Shell::Bash)
+            } else {
+                None
+            };
+            shell::print_shell_setup(shell)
+        }
     }
 }

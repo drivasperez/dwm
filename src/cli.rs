@@ -43,7 +43,20 @@ pub enum Commands {
         name: Option<String>,
     },
     /// Print shell integration wrapper
-    ShellSetup,
+    ShellSetup {
+        /// Emit POSIX (bash/zsh) wrapper
+        #[arg(long, group = "shell_type")]
+        posix: bool,
+        /// Emit bash wrapper (alias for --posix)
+        #[arg(long, group = "shell_type")]
+        bash: bool,
+        /// Emit zsh wrapper (alias for --posix)
+        #[arg(long, group = "shell_type")]
+        zsh: bool,
+        /// Emit fish wrapper
+        #[arg(long, group = "shell_type")]
+        fish: bool,
+    },
 }
 
 #[cfg(test)]
@@ -128,7 +141,57 @@ mod tests {
     #[test]
     fn shell_setup_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "shell-setup"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::ShellSetup)));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellSetup {
+                posix: false,
+                bash: false,
+                zsh: false,
+                fish: false
+            })
+        ));
+    }
+
+    #[test]
+    fn shell_setup_fish_flag() {
+        let cli = Cli::try_parse_from(["dwm", "shell-setup", "--fish"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellSetup { fish: true, .. })
+        ));
+    }
+
+    #[test]
+    fn shell_setup_bash_flag() {
+        let cli = Cli::try_parse_from(["dwm", "shell-setup", "--bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellSetup { bash: true, .. })
+        ));
+    }
+
+    #[test]
+    fn shell_setup_zsh_flag() {
+        let cli = Cli::try_parse_from(["dwm", "shell-setup", "--zsh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellSetup { zsh: true, .. })
+        ));
+    }
+
+    #[test]
+    fn shell_setup_posix_flag() {
+        let cli = Cli::try_parse_from(["dwm", "shell-setup", "--posix"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellSetup { posix: true, .. })
+        ));
+    }
+
+    #[test]
+    fn shell_setup_mutually_exclusive_flags() {
+        let err = Cli::try_parse_from(["dwm", "shell-setup", "--bash", "--fish"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

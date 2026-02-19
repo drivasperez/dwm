@@ -23,13 +23,15 @@ Every bug fix should include a regression test. New parsing functions and utilit
 
 ## Architecture
 
-**Execution flow:** `main.rs` → clap CLI (`cli.rs`) → dispatches to `workspace.rs` functions → which call `jj.rs` helpers → TUI picker in `tui.rs`.
+**Execution flow:** `main.rs` → clap CLI (`cli.rs`) → dispatches to `workspace.rs` functions → which call VCS backends (`jj.rs`/`git.rs`) via `vcs.rs` trait → TUI picker in `tui.rs`.
 
 ### Module responsibilities
 
-- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `delete`, `shell-setup`.
-- **`jj.rs`** — All `jj` CLI interactions. Runs `jj` as a subprocess via `Command`. Owns `WorkspaceInfo` and `DiffStat` structs. Parsing functions for jj output are pure and unit-tested.
-- **`workspace.rs`** — Business logic: workspace creation/deletion/listing. Manages `~/.dwm/` directory layout. `WorkspaceEntry` is the main data struct passed to the TUI.
+- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `shell-setup`.
+- **`vcs.rs`** — VCS abstraction layer. Defines `VcsBackend` trait, `VcsType` enum, and owns `WorkspaceInfo` and `DiffStat` structs shared across backends.
+- **`jj.rs`** — jj backend implementing `VcsBackend`. Runs `jj` as a subprocess via `Command`. Parsing functions for jj output are pure and unit-tested.
+- **`git.rs`** — Git backend implementing `VcsBackend`. Runs `git` as a subprocess via `Command`.
+- **`workspace.rs`** — Business logic: workspace creation/deletion/listing/renaming/switching. Manages `~/.dwm/` directory layout. `WorkspaceEntry` is the main data struct passed to the TUI.
 - **`tui.rs`** — Ratatui-based interactive table picker. Renders `WorkspaceEntry` data in a 6-column table (Name, Change, Description, Bookmarks, Modified, Changes).
 - **`names.rs`** — Random `adjective-noun` name generator for unnamed workspaces.
 - **`shell.rs`** — Emits a shell wrapper function; when `dwm` prints a directory path to stdout, the wrapper `cd`s into it.

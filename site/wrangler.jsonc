@@ -2,12 +2,12 @@
   "name": "dwm",
   "compatibility_date": "2025-09-30",
   "assets": {
-    "directory": "./dist"
+    "directory": "./dist",
   },
   "routes": [
     {
       "pattern": "dwm.drpz.xyz/*",
-      "zone_name": "drpz.xyz"
-    }
-  ]
+      "zone_name": "drpz.xyz",
+    },
+  ],
 }

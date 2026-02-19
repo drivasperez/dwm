@@ -1,373 +1,385 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>dwm — a workspace manager for jj and git</title>
-  <link rel="icon" type="image/x-icon" href="favicon.ico">
-  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
-  <link rel="manifest" href="site.webmanifest">
-  <meta name="description"
-    content="dwm is a TUI workspace manager for jj (Jujutsu VCS) and git. It creates, lists, and deletes workspaces with an interactive picker.">
-  <style>
-    @font-face {
-      font-family: "Berkeley Mono";
-      src: url("fonts/BerkeleyMonoVariable-Regular.woff2") format("woff2-variations");
-      font-style: normal;
-      font-weight: 100 700;
-      font-display: swap;
-    }
-
-    @font-face {
-      font-family: "Berkeley Mono";
-      src: url("fonts/BerkeleyMonoVariable-Italic.woff2") format("woff2-variations");
-      font-style: italic;
-      font-weight: 100 700;
-      font-display: swap;
-    }
-
-    :root {
-      --fg: hsl(0, 0%, 10%);
-      --bg: hsl(60, 100%, 99%);
-      --dim: hsl(0, 0%, 33%);
-      --accent: hsl(0, 0%, 10%);
-      --code-bg: hsl(50, 20%, 93%);
-      --border: hsl(0, 0%, 80%);
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --fg: hsl(0, 0%, 83%);
-        --bg: hsl(0, 0%, 10%);
-        --dim: hsl(0, 0%, 60%);
-        --accent: hsl(0, 0%, 83%);
-        --code-bg: hsl(0, 0%, 16%);
-        --border: hsl(0, 0%, 27%);
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dwm — a workspace manager for jj and git</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+    <link rel="manifest" href="site.webmanifest" />
+    <meta
+      name="description"
+      content="dwm is a TUI workspace manager for jj (Jujutsu VCS) and git. It creates, lists, and deletes workspaces with an interactive picker."
+    />
+    <style>
+      @font-face {
+        font-family: "Berkeley Mono";
+        src: url("fonts/BerkeleyMonoVariable-Regular.woff2") format("woff2-variations");
+        font-style: normal;
+        font-weight: 100 700;
+        font-display: swap;
       }
-    }
 
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+      @font-face {
+        font-family: "Berkeley Mono";
+        src: url("fonts/BerkeleyMonoVariable-Italic.woff2") format("woff2-variations");
+        font-style: italic;
+        font-weight: 100 700;
+        font-display: swap;
+      }
 
-    body {
-      font-family: "Berkeley Mono", "SF Mono", "Menlo", "Consolas", monospace;
-      font-size: 13px;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      line-height: 1.5;
-      color: var(--fg);
-      background: var(--bg);
-      max-width: 72ch;
-      padding: 2rem 1.5rem;
-      font-weight: 100;
-    }
+      :root {
+        --fg: hsl(0, 0%, 10%);
+        --bg: hsl(60, 100%, 99%);
+        --dim: hsl(0, 0%, 33%);
+        --accent: hsl(0, 0%, 10%);
+        --code-bg: hsl(50, 20%, 93%);
+        --border: hsl(0, 0%, 80%);
+      }
 
-    h1 {
-      font-size: 14px;
-      font-weight: bold;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 1.5rem;
-    }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: hsl(0, 0%, 83%);
+          --bg: hsl(0, 0%, 10%);
+          --dim: hsl(0, 0%, 60%);
+          --accent: hsl(0, 0%, 83%);
+          --code-bg: hsl(0, 0%, 16%);
+          --border: hsl(0, 0%, 27%);
+        }
+      }
 
-    h2 {
-      font-size: 14px;
-      font-weight: bold;
-      margin-top: 2rem;
-      margin-bottom: 0.75rem;
-    }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
 
-    p {
-      margin-bottom: 0.75rem;
-    }
+      body {
+        font-family: "Berkeley Mono", "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        line-height: 1.5;
+        color: var(--fg);
+        background: var(--bg);
+        max-width: 72ch;
+        padding: 2rem 1.5rem;
+        font-weight: 100;
+      }
 
-    a {
-      color: var(--fg);
-    }
+      h1 {
+        font-size: 14px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 1.5rem;
+      }
 
-    code {
-      background: var(--code-bg);
-      padding: 0.1em 0.3em;
-      font-family: inherit;
-      font-size: inherit;
-    }
+      h2 {
+        font-size: 14px;
+        font-weight: bold;
+        margin-top: 2rem;
+        margin-bottom: 0.75rem;
+      }
 
-    .pre-wrap {
-      display: grid;
-      margin-bottom: 0.75rem;
-    }
+      p {
+        margin-bottom: 0.75rem;
+      }
 
-    .pre-wrap pre,
-    .pre-wrap .copy-overlay {
-      grid-area: 1 / 1;
-    }
+      a {
+        color: var(--fg);
+      }
 
-    .pre-wrap pre {
-      margin-bottom: 0;
-    }
+      code {
+        background: var(--code-bg);
+        padding: 0.1em 0.3em;
+        font-family: inherit;
+        font-size: inherit;
+      }
 
-    pre {
-      background: var(--code-bg);
-      padding: 0.75rem 1rem;
-      overflow-x: auto;
-      border: 1px solid var(--border);
-    }
+      .pre-wrap {
+        display: grid;
+        margin-bottom: 0.75rem;
+      }
 
-    .copy-overlay {
-      position: relative;
-      pointer-events: none;
-    }
+      .pre-wrap pre,
+      .pre-wrap .copy-overlay {
+        grid-area: 1 / 1;
+      }
 
-    .copy-btn {
-      position: absolute;
-      top: 0.35rem;
-      right: 0.35rem;
-      pointer-events: auto;
-      display: flex;
-      align-items: center;
-      gap: 0.3em;
-      padding: 0.2em 0.5em;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      color: var(--dim);
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 400;
-      cursor: pointer;
-      opacity: 0;
-      transition: opacity 0.15s, color 0.15s, border-color 0.15s;
-      user-select: none;
-    }
+      .pre-wrap pre {
+        margin-bottom: 0;
+      }
 
-    .pre-wrap:hover .copy-btn,
-    .copy-btn:focus {
-      opacity: 1;
-    }
+      pre {
+        background: var(--code-bg);
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+        border: 1px solid var(--border);
+      }
 
-    .copy-btn:hover {
-      color: var(--fg);
-      border-color: var(--dim);
-    }
+      .copy-overlay {
+        position: relative;
+        pointer-events: none;
+      }
 
-    .copy-btn.copied {
-      color: var(--fg);
-      opacity: 1;
-    }
+      .copy-btn {
+        position: absolute;
+        top: 0.35rem;
+        right: 0.35rem;
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.3em;
+        padding: 0.2em 0.5em;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--dim);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 400;
+        cursor: pointer;
+        opacity: 0;
+        transition:
+          opacity 0.15s,
+          color 0.15s,
+          border-color 0.15s;
+        user-select: none;
+      }
 
-    pre code {
-      background: none;
-      padding: 0;
-    }
+      .pre-wrap:hover .copy-btn,
+      .copy-btn:focus {
+        opacity: 1;
+      }
 
-    .screenshot {
-      max-width: 100%;
-      height: auto;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-    }
+      .copy-btn:hover {
+        color: var(--fg);
+        border-color: var(--dim);
+      }
 
-    .dim {
-      color: var(--dim);
-    }
+      .copy-btn.copied {
+        color: var(--fg);
+        opacity: 1;
+      }
 
-    .section {
-      margin-bottom: 1.5rem;
-    }
+      pre code {
+        background: none;
+        padding: 0;
+      }
 
-    dl {
-      margin-bottom: 0.75rem;
-    }
+      .screenshot {
+        max-width: 100%;
+        height: auto;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
 
-    dt {
-      font-weight: bold;
-    }
+      .dim {
+        color: var(--dim);
+      }
 
-    dd {
-      margin-left: 2ch;
-      margin-bottom: 0.5rem;
-    }
+      .section {
+        margin-bottom: 1.5rem;
+      }
 
-    hr {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: 2rem 0;
-    }
-  </style>
-</head>
+      dl {
+        margin-bottom: 0.75rem;
+      }
 
-<body>
+      dt {
+        font-weight: bold;
+      }
 
-  <h1>dwm(1) <span class="dim">— dan's workspace manager</span></h1>
+      dd {
+        margin-left: 2ch;
+        margin-bottom: 0.5rem;
+      }
 
-  <div class="section">
-    <h2>NAME</h2>
-    <p>
-      dwm — a TUI workspace manager for
-      <a href="https://martinvonz.github.io/jj/">jj</a> and
-      <a href="https://git-scm.com/">git</a>
-    </p>
-  </div>
+      hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 2rem 0;
+      }
+    </style>
+  </head>
 
-  <div class="section">
-    <h2>DESCRIPTION</h2>
-    <p>
-      Suddenly everyone is building multi-agentic workflows on top of
-      git worktrees, and there are a lot of apps to manage them. Most
-      of them do too much, and they don't support jj workspaces.
-      Here is mine, which aims to do as little as possible while remaining
-      useful.
-    </p>
-    <p>
-      dwm (pronounced "doom") creates, lists, and deletes workspaces
-      stored under <code>~/.dwm/&lt;repo&gt;/</code>, with a shell wrapper that
-      auto-<code>cd</code>s into the selected workspace. It works with
-      both jj and git repositories.
-    </p>
-    <p>
-      It provides an interactive TUI picker for browsing and switching
-      between workspaces, with filtering, sorting, and inline deletion.
-    </p>
-    <p>
-      My workflow looks like this: <code>dwm new</code> to create and move
-      to the new worktree, and then <code>claude</code> to open my coding assistant of
-      choice. Once my changes are done, I run <code>dwm delete</code> to clear up
-      the worktree. If I'm switching between long-lived tasks, I use
-      <code>dwm list</code> to see my open workspaces.
-    </p>
-  </div>
+  <body>
+    <h1>dwm(1) <span class="dim">— dan's workspace manager</span></h1>
 
-  <div class="section">
-    <img src="dwm-screenshot.jpg" alt="dwm TUI showing workspace list with preview pane" class="screenshot">
-  </div>
+    <div class="section">
+      <h2>NAME</h2>
+      <p>
+        dwm — a TUI workspace manager for
+        <a href="https://martinvonz.github.io/jj/">jj</a> and
+        <a href="https://git-scm.com/">git</a>
+      </p>
+    </div>
 
-  <div class="section">
-    <h2>INSTALL</h2>
+    <div class="section">
+      <h2>DESCRIPTION</h2>
+      <p>
+        Suddenly everyone is building multi-agentic workflows on top of git worktrees, and there are
+        a lot of apps to manage them. Most of them do too much, and they don't support jj
+        workspaces. Here is mine, which aims to do as little as possible while remaining useful.
+      </p>
+      <p>
+        dwm (pronounced "doom") creates, lists, and deletes workspaces stored under
+        <code>~/.dwm/&lt;repo&gt;/</code>, with a shell wrapper that auto-<code>cd</code>s into the
+        selected workspace. It works with both jj and git repositories.
+      </p>
+      <p>
+        It provides an interactive TUI picker for browsing and switching between workspaces, with
+        filtering, sorting, and inline deletion.
+      </p>
+      <p>
+        My workflow looks like this: <code>dwm new</code> to create and move to the new worktree,
+        and then <code>claude</code> to open my coding assistant of choice. Once my changes are
+        done, I run <code>dwm delete</code> to clear up the worktree. If I'm switching between
+        long-lived tasks, I use <code>dwm list</code> to see my open workspaces.
+      </p>
+    </div>
 
-    <p>Shell installer (macOS and Linux):</p>
-    <pre><code>curl --proto '=https' --tlsv1.2 -LsSf
+    <div class="section">
+      <img
+        src="dwm-screenshot.jpg"
+        alt="dwm TUI showing workspace list with preview pane"
+        class="screenshot"
+      />
+    </div>
+
+    <div class="section">
+      <h2>INSTALL</h2>
+
+      <p>Shell installer (macOS and Linux):</p>
+      <pre><code>curl --proto '=https' --tlsv1.2 -LsSf
     https://github.com/drivasperez/dwm/releases/download/v{{VERSION}}/dwm-installer.sh | sh</code></pre>
 
-    <p>Homebrew:</p>
-    <pre><code>brew install drivasperez/tap/dwm</code></pre>
+      <p>Homebrew:</p>
+      <pre><code>brew install drivasperez/tap/dwm</code></pre>
 
-    <p>Cargo:</p>
-    <pre><code>cargo install dwm</code></pre>
+      <p>Cargo:</p>
+      <pre><code>cargo install dwm</code></pre>
 
-    <p>
-      Pre-built binaries are available on the
-      <a href="https://github.com/drivasperez/dwm/releases/latest">latest GitHub release</a>.
+      <p>
+        Pre-built binaries are available on the
+        <a href="https://github.com/drivasperez/dwm/releases/latest">latest GitHub release</a>.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>SHELL SETUP</h2>
+      <p>
+        `dwm` needs to add a small snippet to your shell config in order to be able to switch
+        directories automatically. Run <code>dwm shell-setup</code> interactively and it will offer
+        to add the wrapper to your shell config automatically:
+      </p>
+      <pre><code>dwm shell-setup</code></pre>
+      <p>Or add it manually:</p>
+      <p><strong>Bash / Zsh</strong> — add to <code>.bashrc</code> or <code>.zshrc</code>:</p>
+      <pre><code>eval "$(dwm shell-setup)"</code></pre>
+      <p><strong>Fish</strong> — add to <code>~/.config/fish/config.fish</code>:</p>
+      <pre><code>dwm shell-setup --fish | source</code></pre>
+      <p>
+        This wraps the <code>dwm</code> binary so that selecting a workspace automatically
+        <code>cd</code>s into it.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>USAGE</h2>
+      <dl>
+        <dt>dwm new [name]</dt>
+        <dd>Create a workspace (name auto-generated if omitted)</dd>
+
+        <dt>dwm new --at &lt;rev&gt;</dt>
+        <dd>Create a workspace starting from a specific revision</dd>
+
+        <dt>dwm list</dt>
+        <dd>Interactive TUI picker to switch workspaces</dd>
+
+        <dt>dwm list --all</dt>
+        <dd>Multi-repo dashboard across all repos</dd>
+
+        <dt>dwm status</dt>
+        <dd>Non-interactive workspace summary</dd>
+
+        <dt>dwm switch &lt;name&gt;</dt>
+        <dd>Switch to a workspace by name</dd>
+
+        <dt>dwm rename &lt;old&gt; &lt;new&gt;</dt>
+        <dd>Rename a workspace</dd>
+
+        <dt>dwm delete [name]</dt>
+        <dd>Delete a workspace (current one if name omitted)</dd>
+      </dl>
+    </div>
+
+    <div class="section">
+      <h2>FEATURES</h2>
+      <p><strong>Git and jj support</strong> — works with both git and jj repositories.</p>
+      <p>
+        <strong>Interactive picker</strong> — browse and switch workspaces interactively. Filter by
+        typing, cycle sort modes, and delete workspaces inline.
+      </p>
+      <p>
+        <strong>Multi-repo dashboard</strong> — <code>dwm list --all</code>
+        shows workspaces across all repos.
+      </p>
+      <p>
+        <strong>Stale workspace detection</strong> — flags workspaces that are merged or older than
+        30 days.
+      </p>
+      <p>
+        <strong>Auto-generated names</strong> — random adjective-noun names when you don't specify
+        one.
+      </p>
+    </div>
+
+    <hr />
+
+    <p class="dim">
+      dwm {{VERSION}} —
+      <a href="https://github.com/drivasperez/dwm">source</a> —
+      <a href="https://github.com/drivasperez/dwm/releases/latest">releases</a>
     </p>
-  </div>
 
-  <div class="section">
-    <h2>SHELL SETUP</h2>
-    <p>Add to your shell config (<code>.bashrc</code>, <code>.zshrc</code>, etc.):</p>
-    <pre><code>eval "$(dwm shell-setup)"</code></pre>
-    <p>
-      This wraps the <code>dwm</code> binary so that selecting a workspace
-      automatically <code>cd</code>s into it.
-    </p>
-  </div>
+    <script>
+      var COPY_ICON =
+        '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h2" stroke="currentColor" stroke-width="1.5"/></svg>copy';
+      var CHECK_ICON =
+        '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 8.5l4 4 7-8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>copied';
 
-  <div class="section">
-    <h2>USAGE</h2>
-    <dl>
-      <dt>dwm new [name]</dt>
-      <dd>Create a workspace (name auto-generated if omitted)</dd>
+      document.querySelectorAll("pre").forEach(function (pre) {
+        var wrap = document.createElement("div");
+        wrap.className = "pre-wrap";
+        pre.parentNode.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
 
-      <dt>dwm new --at &lt;rev&gt;</dt>
-      <dd>Create a workspace starting from a specific revision</dd>
+        var overlay = document.createElement("div");
+        overlay.className = "copy-overlay";
 
-      <dt>dwm list</dt>
-      <dd>Interactive TUI picker to switch workspaces</dd>
-
-      <dt>dwm list --all</dt>
-      <dd>Multi-repo dashboard across all repos</dd>
-
-      <dt>dwm status</dt>
-      <dd>Non-interactive workspace summary</dd>
-
-      <dt>dwm rename &lt;old&gt; &lt;new&gt;</dt>
-      <dd>Rename a workspace</dd>
-
-      <dt>dwm delete [name]</dt>
-      <dd>Delete a workspace (current one if name omitted)</dd>
-    </dl>
-  </div>
-
-  <div class="section">
-    <h2>FEATURES</h2>
-    <p>
-      <strong>Git and jj support</strong> — works with both git and jj
-      repositories.
-    </p>
-    <p>
-      <strong>Interactive picker</strong> — browse and switch workspaces
-      interactively. Filter by typing, cycle sort modes,
-      and delete workspaces inline.
-    </p>
-    <p>
-      <strong>Multi-repo dashboard</strong> — <code>dwm list --all</code>
-      shows workspaces across all repos.
-    </p>
-    <p>
-      <strong>Stale workspace detection</strong> — flags workspaces that
-      are merged or older than 30 days.
-    </p>
-    <p>
-      <strong>Auto-generated names</strong> — random adjective-noun names
-      when you don't specify one.
-    </p>
-  </div>
-
-  <hr>
-
-  <p class="dim">
-    dwm {{VERSION}} —
-    <a href="https://github.com/drivasperez/dwm">source</a> —
-    <a href="https://github.com/drivasperez/dwm/releases/latest">releases</a>
-  </p>
-
-  <script>
-    var COPY_ICON = '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h2" stroke="currentColor" stroke-width="1.5"/></svg>copy';
-    var CHECK_ICON = '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 8.5l4 4 7-8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>copied';
-
-    document.querySelectorAll('pre').forEach(function (pre) {
-      var wrap = document.createElement('div');
-      wrap.className = 'pre-wrap';
-      pre.parentNode.insertBefore(wrap, pre);
-      wrap.appendChild(pre);
-
-      var overlay = document.createElement('div');
-      overlay.className = 'copy-overlay';
-
-      var btn = document.createElement('button');
-      btn.className = 'copy-btn';
-      btn.setAttribute('aria-label', 'Copy to clipboard');
-      btn.innerHTML = COPY_ICON;
-      btn.addEventListener('click', function () {
-        var code = pre.querySelector('code') || pre;
-        var text = code.textContent.replace(/\s*\n\s*/g, ' ').trim();
-        navigator.clipboard.writeText(text).then(function () {
-          btn.classList.add('copied');
-          btn.innerHTML = CHECK_ICON;
-          setTimeout(function () {
-            btn.classList.remove('copied');
-            btn.innerHTML = COPY_ICON;
-          }, 2000);
+        var btn = document.createElement("button");
+        btn.className = "copy-btn";
+        btn.setAttribute("aria-label", "Copy to clipboard");
+        btn.innerHTML = COPY_ICON;
+        btn.addEventListener("click", function () {
+          var code = pre.querySelector("code") || pre;
+          var text = code.textContent.replace(/\s*\n\s*/g, " ").trim();
+          navigator.clipboard.writeText(text).then(function () {
+            btn.classList.add("copied");
+            btn.innerHTML = CHECK_ICON;
+            setTimeout(function () {
+              btn.classList.remove("copied");
+              btn.innerHTML = COPY_ICON;
+            }, 2000);
+          });
         });
+
+        overlay.appendChild(btn);
+        wrap.appendChild(overlay);
       });
-
-      overlay.appendChild(btn);
-      wrap.appendChild(overlay);
-    });
-  </script>
-</body>
-
+    </script>
+  </body>
 </html>
