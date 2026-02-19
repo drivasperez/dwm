@@ -99,6 +99,20 @@ pub trait VcsBackend {
     /// Name of the primary workspace that lives in the original repo directory
     /// (e.g. `"default"` for jj, `"main-worktree"` for git).
     fn main_workspace_name(&self) -> &'static str;
+
+    fn preview_log(
+        &self,
+        _repo_dir: &Path,
+        _worktree_dir: &Path,
+        _ws_name: &str,
+        _limit: usize,
+    ) -> String {
+        String::new()
+    }
+
+    fn preview_diff_stat(&self, _repo_dir: &Path, _worktree_dir: &Path, _ws_name: &str) -> String {
+        String::new()
+    }
 }
 
 /// Detect the VCS backend for a directory by walking up looking for `.jj/` (priority) then `.git/`.

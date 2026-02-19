@@ -16,7 +16,7 @@
 
 ## Exciting / ambitious
 
-- [ ] Preview pane in the TUI — Right-side panel showing `jj log` or `jj diff --stat` for the highlighted workspace. Ratatui split layout.
+- [x] Preview pane in the TUI — Right-side panel showing `jj log` or `jj diff --stat` for the highlighted workspace. Ratatui split layout.
 - [ ] `dwm new --from <workspace>` — Fork an existing workspace by creating a new one and editing the same change the source points at.
 - [ ] Shell prompt integration — Export `dwm_WORKSPACE` env var and provide snippets for starship/p10k/oh-my-zsh showing current workspace name + change ID.
 - [ ] Workspace templates/hooks — `.dwm.toml` in repo root to configure default revset, auto-descriptions, post-create hooks (e.g., `cargo build`).

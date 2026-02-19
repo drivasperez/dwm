@@ -39,6 +39,7 @@ dwm delete [name]       # delete a workspace (current one if omitted)
   - Filter/search workspaces by typing
   - Multiple sort modes (cycle with keybindings)
   - Inline delete without leaving the picker
+  - Preview pane (`p`) showing log and diff stat for the highlighted workspace
 - **Multi-repo dashboard** — `list --all` shows workspaces across all repos
 - **Stale workspace detection** — flags workspaces that are merged or older than 30 days
 - **Auto-generated names** — random `adjective-noun` names when you don't specify one

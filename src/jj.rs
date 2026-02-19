@@ -242,6 +242,39 @@ impl VcsBackend for JjBackend {
     fn main_workspace_name(&self) -> &'static str {
         "default"
     }
+
+    fn preview_log(
+        &self,
+        repo_dir: &Path,
+        _worktree_dir: &Path,
+        ws_name: &str,
+        limit: usize,
+    ) -> String {
+        let ancestor_rev = if ws_name == "default" {
+            "ancestors(@)".to_string()
+        } else {
+            format!("ancestors({}@)", ws_name)
+        };
+        let limit_str = limit.to_string();
+        run_jj_in(
+            repo_dir,
+            &["log", "-r", &ancestor_rev, "--limit", &limit_str],
+        )
+        .unwrap_or_default()
+    }
+
+    fn preview_diff_stat(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> String {
+        let to = if ws_name == "default" {
+            "@".to_string()
+        } else {
+            format!("{}@", ws_name)
+        };
+        run_jj_in(
+            repo_dir,
+            &["diff", "--stat", "--from", "trunk()", "--to", &to],
+        )
+        .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

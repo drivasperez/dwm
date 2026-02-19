@@ -212,6 +212,27 @@ impl VcsBackend for GitBackend {
     fn main_workspace_name(&self) -> &'static str {
         "main-worktree"
     }
+
+    fn preview_log(
+        &self,
+        _repo_dir: &Path,
+        worktree_dir: &Path,
+        _ws_name: &str,
+        limit: usize,
+    ) -> String {
+        let limit_str = format!("-{}", limit);
+        run_git_in(
+            worktree_dir,
+            &["log", "--oneline", "--decorate", &limit_str],
+        )
+        .unwrap_or_default()
+    }
+
+    fn preview_diff_stat(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> String {
+        let trunk = detect_trunk(worktree_dir);
+        let range = format!("{}..HEAD", trunk);
+        run_git_in(worktree_dir, &["diff", "--stat", &range]).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

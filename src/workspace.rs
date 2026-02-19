@@ -458,6 +458,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     } else {
         main_info.description.clone()
     };
+    let vcs_type = deps.backend.vcs_name().to_string();
     entries.push(WorkspaceEntry {
         name: main_ws_name.to_string(),
         path: main_repo.clone(),
@@ -469,6 +470,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         bookmarks: main_info.bookmarks.clone(),
         is_stale: false,
         repo_name: None,
+        main_repo_path: main_repo.clone(),
+        vcs_type: vcs_type.clone(),
     });
 
     // Scan workspace dirs
@@ -522,6 +525,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             change_id: info.change_id,
             description,
             bookmarks: info.bookmarks,
+            main_repo_path: main_repo.clone(),
+            vcs_type: vcs_type.clone(),
         });
     }
 
@@ -544,6 +549,8 @@ pub struct WorkspaceEntry {
     pub bookmarks: Vec<String>,
     pub is_stale: bool,
     pub repo_name: Option<String>,
+    pub main_repo_path: PathBuf,
+    pub vcs_type: String,
 }
 
 /// Determine whether a workspace should be shown as stale.
@@ -1692,6 +1699,8 @@ mod tests {
                 bookmarks: vec!["main".to_string()],
                 is_stale: false,
                 repo_name: None,
+                main_repo_path: PathBuf::from("/tmp/repo"),
+                vcs_type: "jj".to_string(),
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -1704,6 +1713,8 @@ mod tests {
                 bookmarks: vec![],
                 is_stale: false,
                 repo_name: None,
+                main_repo_path: PathBuf::from("/tmp/repo"),
+                vcs_type: "jj".to_string(),
             },
         ];
         // Should not panic; output goes to stderr

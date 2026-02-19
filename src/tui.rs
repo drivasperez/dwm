@@ -5,8 +5,49 @@ use crossterm::{
 };
 use ratatui::{Frame, prelude::*, widgets::*};
 use std::io;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::workspace::{WorkspaceEntry, format_time_ago};
+
+#[derive(Debug, Clone)]
+enum PreviewState {
+    Hidden,
+    Loading,
+    Ready { log: String, diff_stat: String },
+    Error(String),
+}
+
+fn fetch_preview(
+    main_repo_path: PathBuf,
+    worktree_dir: PathBuf,
+    ws_name: String,
+    vcs_type: String,
+    mailbox: Arc<Mutex<Option<PreviewState>>>,
+) {
+    std::thread::spawn(move || {
+        let backend: Box<dyn crate::vcs::VcsBackend + Send> = match vcs_type.as_str() {
+            "jj" => Box::new(crate::jj::JjBackend),
+            "git" => Box::new(crate::git::GitBackend),
+            _ => {
+                let _ = mailbox.lock().map(|mut m| {
+                    *m = Some(PreviewState::Error(format!(
+                        "unknown VCS type: {}",
+                        vcs_type
+                    )));
+                });
+                return;
+            }
+        };
+
+        let log = backend.preview_log(&main_repo_path, &worktree_dir, &ws_name, 10);
+        let diff_stat = backend.preview_diff_stat(&main_repo_path, &worktree_dir, &ws_name);
+
+        let _ = mailbox
+            .lock()
+            .map(|mut m| *m = Some(PreviewState::Ready { log, diff_stat }));
+    });
+}
 
 /// The action chosen by the user in the interactive workspace picker.
 #[derive(Debug)]
@@ -112,6 +153,9 @@ struct App {
     filter_buf: String,
     /// Indices into `entries` that survive the current filter.
     filtered_indices: Vec<usize>,
+    show_preview: bool,
+    preview: PreviewState,
+    preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
 }
 
 impl App {
@@ -129,6 +173,9 @@ impl App {
             sort_mode,
             filter_buf: String::new(),
             filtered_indices,
+            show_preview: false,
+            preview: PreviewState::Hidden,
+            preview_mailbox: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -172,6 +219,35 @@ impl App {
         }
     }
 
+    fn trigger_preview_fetch(&mut self) {
+        if !self.show_preview {
+            return;
+        }
+        if let Some(idx) = self.selected_entry_index() {
+            let entry = &self.entries[idx];
+            self.preview = PreviewState::Loading;
+            let mailbox = Arc::new(Mutex::new(None));
+            self.preview_mailbox = Arc::clone(&mailbox);
+            fetch_preview(
+                entry.main_repo_path.clone(),
+                entry.path.clone(),
+                entry.name.clone(),
+                entry.vcs_type.clone(),
+                mailbox,
+            );
+        } else {
+            self.preview = PreviewState::Hidden;
+        }
+    }
+
+    fn drain_preview_mailbox(&mut self) {
+        if let Ok(mut guard) = self.preview_mailbox.try_lock()
+            && let Some(state) = guard.take()
+        {
+            self.preview = state;
+        }
+    }
+
     /// Recompute `filtered_indices` after `filter_buf` has changed.
     fn recompute_filter(&mut self) {
         if self.filter_buf.is_empty() {
@@ -191,9 +267,66 @@ impl App {
     }
 }
 
+fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
+    let content = match preview {
+        PreviewState::Hidden => String::new(),
+        PreviewState::Loading => "Loading...".to_string(),
+        PreviewState::Error(msg) => format!("Error: {}", msg),
+        PreviewState::Ready { log, diff_stat } => {
+            let mut text = String::new();
+            if !diff_stat.is_empty() {
+                text.push_str("--- diff stat vs trunk ---\n");
+                text.push_str(diff_stat);
+                if !diff_stat.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+            if !log.is_empty() {
+                text.push_str("--- log ---\n");
+                text.push_str(log);
+            }
+            if text.is_empty() {
+                "No changes".to_string()
+            } else {
+                text
+            }
+        }
+    };
+
+    let paragraph = Paragraph::new(content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Preview ")
+                .title_alignment(Alignment::Center),
+        )
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+
+    frame.render_widget(paragraph, area);
+}
+
 /// Render the single-repo workspace table and help bar into `frame`.
 fn render(frame: &mut Frame, app: &App) {
-    let area = frame.area();
+    let full_area = frame.area();
+
+    // Reserve 1 line at the bottom for help bar
+    let (main_area, help_area) = if full_area.height > 3 {
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(full_area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (full_area, None)
+    };
+
+    // Split horizontally if preview is visible
+    let (table_area, preview_area) = if app.show_preview {
+        let chunks = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(main_area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (main_area, None)
+    };
 
     let header_cells = [
         "Name",
@@ -329,10 +462,15 @@ fn render(frame: &mut Frame, app: &App) {
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
 
-    frame.render_widget(table, area);
+    frame.render_widget(table, table_area);
+
+    // Render preview pane if visible
+    if let Some(preview_area) = preview_area {
+        render_preview(frame, preview_area, &app.preview);
+    }
 
     // Render help bar at bottom
-    if area.height > 3 {
+    if let Some(help_area) = help_area {
         let help_text = match app.mode {
             Mode::InputName => " Enter: create  Esc: cancel".to_string(),
             Mode::Filter => format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf),
@@ -347,14 +485,13 @@ fn render(frame: &mut Frame, app: &App) {
                     String::new()
                 };
                 format!(
-                    " j/k: navigate  /: filter  s: sort ({})  d: delete  Enter: select  q: quit{}",
+                    " j/k: navigate  /: filter  s: sort ({})  p: preview  d: delete  Enter: select  q: quit{}",
                     app.sort_mode.label(),
                     filter_info
                 )
             }
         };
         let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
-        let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
         frame.render_widget(help, help_area);
     }
 }
@@ -364,17 +501,27 @@ fn render(frame: &mut Frame, app: &App) {
 fn run_picker_inner<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: Vec<WorkspaceEntry>,
-    next_event: &mut dyn FnMut() -> Result<Event>,
+    next_event: &mut dyn FnMut() -> Result<Option<Event>>,
 ) -> Result<Option<PickerResult>> {
     let mut app = App::new(entries);
 
     loop {
+        // Drain preview mailbox before drawing
+        app.drain_preview_mailbox();
+
         terminal.draw(|f| render(f, &app))?;
 
-        if let Event::Key(key) = next_event()? {
+        let event = next_event()?;
+        let Some(event) = event else {
+            continue;
+        };
+
+        if let Event::Key(key) = event {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            let prev_selected = app.selected;
 
             match app.mode {
                 Mode::Browse => match key.code {
@@ -405,6 +552,14 @@ fn run_picker_inner<B: Backend>(
                     }
                     KeyCode::Char('/') => {
                         app.mode = Mode::Filter;
+                    }
+                    KeyCode::Char('p') => {
+                        app.show_preview = !app.show_preview;
+                        if app.show_preview {
+                            app.trigger_preview_fetch();
+                        } else {
+                            app.preview = PreviewState::Hidden;
+                        }
                     }
                     KeyCode::Char('d') => {
                         if let Some(idx) = app.selected_entry_index() {
@@ -470,6 +625,11 @@ fn run_picker_inner<B: Backend>(
                     _ => {}
                 },
             }
+
+            // Trigger preview fetch on selection change
+            if app.selected != prev_selected {
+                app.trigger_preview_fetch();
+            }
         }
     }
 }
@@ -490,7 +650,13 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_picker_inner(&mut terminal, entries, &mut || Ok(event::read()?));
+    let result = run_picker_inner(&mut terminal, entries, &mut || {
+        if event::poll(std::time::Duration::from_millis(100))? {
+            Ok(Some(event::read()?))
+        } else {
+            Ok(None)
+        }
+    });
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -510,6 +676,9 @@ struct MultiRepoApp {
     filtered_indices: Vec<usize>,
     /// Whether the user is currently typing a filter string.
     filter_mode: bool,
+    show_preview: bool,
+    preview: PreviewState,
+    preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
 }
 
 impl MultiRepoApp {
@@ -525,6 +694,9 @@ impl MultiRepoApp {
             filter_buf: String::new(),
             filtered_indices,
             filter_mode: false,
+            show_preview: false,
+            preview: PreviewState::Hidden,
+            preview_mailbox: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -541,6 +713,10 @@ impl MultiRepoApp {
         self.filtered_indices.len()
     }
 
+    fn selected_entry_index(&self) -> Option<usize> {
+        self.filtered_indices.get(self.selected).copied()
+    }
+
     /// Move the cursor down one row (wrapping).
     fn next(&mut self) {
         let total = self.total_rows();
@@ -554,6 +730,35 @@ impl MultiRepoApp {
         let total = self.total_rows();
         if total > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
+        }
+    }
+
+    fn trigger_preview_fetch(&mut self) {
+        if !self.show_preview {
+            return;
+        }
+        if let Some(idx) = self.selected_entry_index() {
+            let entry = &self.entries[idx];
+            self.preview = PreviewState::Loading;
+            let mailbox = Arc::new(Mutex::new(None));
+            self.preview_mailbox = Arc::clone(&mailbox);
+            fetch_preview(
+                entry.main_repo_path.clone(),
+                entry.path.clone(),
+                entry.name.clone(),
+                entry.vcs_type.clone(),
+                mailbox,
+            );
+        } else {
+            self.preview = PreviewState::Hidden;
+        }
+    }
+
+    fn drain_preview_mailbox(&mut self) {
+        if let Ok(mut guard) = self.preview_mailbox.try_lock()
+            && let Some(state) = guard.take()
+        {
+            self.preview = state;
         }
     }
 
@@ -578,7 +783,24 @@ impl MultiRepoApp {
 
 /// Render the multi-repo workspace table and help bar into `frame`.
 fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
-    let area = frame.area();
+    let full_area = frame.area();
+
+    // Reserve 1 line at the bottom for help bar
+    let (main_area, help_area) = if full_area.height > 3 {
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(full_area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (full_area, None)
+    };
+
+    // Split horizontally if preview is visible
+    let (table_area, preview_area) = if app.show_preview {
+        let chunks = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(main_area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (main_area, None)
+    };
 
     let header_cells = [
         "Repo",
@@ -689,9 +911,14 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
 
-    frame.render_widget(table, area);
+    frame.render_widget(table, table_area);
 
-    if area.height > 3 {
+    // Render preview pane if visible
+    if let Some(preview_area) = preview_area {
+        render_preview(frame, preview_area, &app.preview);
+    }
+
+    if let Some(help_area) = help_area {
         let help_text = if app.filter_mode {
             format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf)
         } else {
@@ -701,13 +928,12 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
                 String::new()
             };
             format!(
-                " j/k: navigate  /: filter  s: sort ({})  Enter: select  q: quit{}",
+                " j/k: navigate  /: filter  s: sort ({})  p: preview  Enter: select  q: quit{}",
                 app.sort_mode.label(),
                 filter_info
             )
         };
         let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
-        let help_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
         frame.render_widget(help, help_area);
     }
 }
@@ -716,17 +942,27 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
 fn run_picker_multi_repo_inner<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: Vec<WorkspaceEntry>,
-    next_event: &mut dyn FnMut() -> Result<Event>,
+    next_event: &mut dyn FnMut() -> Result<Option<Event>>,
 ) -> Result<Option<PickerResult>> {
     let mut app = MultiRepoApp::new(entries);
 
     loop {
+        // Drain preview mailbox before drawing
+        app.drain_preview_mailbox();
+
         terminal.draw(|f| render_multi_repo(f, &app))?;
 
-        if let Event::Key(key) = next_event()? {
+        let event = next_event()?;
+        let Some(event) = event else {
+            continue;
+        };
+
+        if let Event::Key(key) = event {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            let prev_selected = app.selected;
 
             if app.filter_mode {
                 match key.code {
@@ -762,6 +998,14 @@ fn run_picker_multi_repo_inner<B: Backend>(
                     KeyCode::Char('/') => {
                         app.filter_mode = true;
                     }
+                    KeyCode::Char('p') => {
+                        app.show_preview = !app.show_preview;
+                        if app.show_preview {
+                            app.trigger_preview_fetch();
+                        } else {
+                            app.preview = PreviewState::Hidden;
+                        }
+                    }
                     KeyCode::Enter => {
                         if let Some(&idx) = app.filtered_indices.get(app.selected) {
                             let path = app.entries[idx].path.to_string_lossy().to_string();
@@ -770,6 +1014,11 @@ fn run_picker_multi_repo_inner<B: Backend>(
                     }
                     _ => {}
                 }
+            }
+
+            // Trigger preview fetch on selection change
+            if app.selected != prev_selected {
+                app.trigger_preview_fetch();
             }
         }
     }
@@ -790,7 +1039,13 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_picker_multi_repo_inner(&mut terminal, entries, &mut || Ok(event::read()?));
+    let result = run_picker_multi_repo_inner(&mut terminal, entries, &mut || {
+        if event::poll(std::time::Duration::from_millis(100))? {
+            Ok(Some(event::read()?))
+        } else {
+            Ok(None)
+        }
+    });
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -829,6 +1084,8 @@ mod tests {
             bookmarks: Vec::new(),
             is_stale: false,
             repo_name: None,
+            main_repo_path: PathBuf::from("/tmp/repo"),
+            vcs_type: "jj".to_string(),
         }
     }
 
@@ -901,6 +1158,8 @@ mod tests {
             bookmarks: bookmarks.into_iter().map(String::from).collect(),
             is_stale: false,
             repo_name: None,
+            main_repo_path: PathBuf::from("/tmp/repo"),
+            vcs_type: "jj".to_string(),
         }
     }
 
@@ -988,8 +1247,8 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
         run_picker_inner(&mut terminal, entries, &mut || match key_iter.next() {
-            Some(code) => Ok(key(code)),
-            None => Ok(key(KeyCode::Esc)),
+            Some(code) => Ok(Some(key(code))),
+            None => Ok(Some(key(KeyCode::Esc))),
         })
     }
 
@@ -1002,8 +1261,8 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
         run_picker_multi_repo_inner(&mut terminal, entries, &mut || match key_iter.next() {
-            Some(code) => Ok(key(code)),
-            None => Ok(key(KeyCode::Esc)),
+            Some(code) => Ok(Some(key(code))),
+            None => Ok(Some(key(KeyCode::Esc))),
         })
     }
 
@@ -1021,6 +1280,8 @@ mod tests {
             bookmarks: vec![],
             is_stale: false,
             repo_name: None,
+            main_repo_path: PathBuf::from("/tmp/repo"),
+            vcs_type: "jj".to_string(),
         }
     }
 
@@ -1328,5 +1589,85 @@ mod tests {
             Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/beta"),
             other => panic!("expected Selected beta, got {:?}", other),
         }
+    }
+
+    // ── Preview pane tests ──────────────────────────────────────────
+
+    #[test]
+    fn tui_preview_hidden_by_default() {
+        let app = App::new(vec![make_named_entry("ws1", "/tmp/ws1")]);
+        assert!(!app.show_preview);
+        assert!(matches!(app.preview, PreviewState::Hidden));
+    }
+
+    #[test]
+    fn tui_preview_toggle() {
+        let entries = vec![make_named_entry("ws1", "/tmp/ws1")];
+        let mut app = App::new(entries);
+
+        // Initially hidden
+        assert!(!app.show_preview);
+
+        // Toggle on
+        app.show_preview = true;
+        assert!(app.show_preview);
+
+        // Toggle off
+        app.show_preview = false;
+        app.preview = PreviewState::Hidden;
+        assert!(!app.show_preview);
+        assert!(matches!(app.preview, PreviewState::Hidden));
+    }
+
+    #[test]
+    fn tui_preview_toggle_via_keys() {
+        // Press p to enable preview, then p to disable, then q to quit
+        let entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        let result = run_picker_with_keys(
+            entries,
+            vec![KeyCode::Char('p'), KeyCode::Char('p'), KeyCode::Char('q')],
+        )
+        .unwrap();
+        // Should quit normally
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_multi_preview_toggle_via_keys() {
+        let entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        let result = run_multi_picker_with_keys(
+            entries,
+            vec![KeyCode::Char('p'), KeyCode::Char('p'), KeyCode::Char('q')],
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_multi_preview_hidden_by_default() {
+        let app = MultiRepoApp::new(vec![make_named_entry("ws1", "/tmp/ws1")]);
+        assert!(!app.show_preview);
+        assert!(matches!(app.preview, PreviewState::Hidden));
+    }
+
+    #[test]
+    fn tui_help_bar_shows_preview_hint() {
+        let app = App::new(vec![make_named_entry("ws1", "/tmp/ws1")]);
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Check the last line of the buffer for the help text
+        let last_row = buf.area.height - 1;
+        let mut line = String::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, last_row)];
+            line.push_str(cell.symbol());
+        }
+        assert!(
+            line.contains("p: preview"),
+            "help bar should contain 'p: preview', got: '{}'",
+            line.trim()
+        );
     }
 }
