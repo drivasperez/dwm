@@ -16,7 +16,7 @@ use cli::{Cli, Commands};
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    match cli.command.unwrap_or(Commands::List { all: false }) {
         Commands::New { name, at } => workspace::new_workspace(name, at.as_deref()),
         Commands::List { all } => {
             if all {
