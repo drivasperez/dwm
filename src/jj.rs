@@ -235,8 +235,8 @@ impl VcsBackend for JjBackend {
         }
     }
 
-    fn vcs_name(&self) -> &'static str {
-        "jj"
+    fn vcs_type(&self) -> crate::vcs::VcsType {
+        crate::vcs::VcsType::Jj
     }
 
     fn main_workspace_name(&self) -> &'static str {

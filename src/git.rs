@@ -205,8 +205,8 @@ impl VcsBackend for GitBackend {
         .is_ok()
     }
 
-    fn vcs_name(&self) -> &'static str {
-        "git"
+    fn vcs_type(&self) -> crate::vcs::VcsType {
+        crate::vcs::VcsType::Git
     }
 
     fn main_workspace_name(&self) -> &'static str {
@@ -312,8 +312,8 @@ branch refs/heads/main
     }
 
     #[test]
-    fn git_backend_vcs_name() {
-        assert_eq!(GitBackend.vcs_name(), "git");
+    fn git_backend_vcs_type() {
+        assert_eq!(GitBackend.vcs_type(), crate::vcs::VcsType::Git);
     }
 
     #[test]

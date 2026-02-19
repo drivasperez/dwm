@@ -37,7 +37,7 @@ fn ensure_repo_dir(
     dwm_base: &Path,
     repo_name: &str,
     main_repo_root: &Path,
-    vcs_type: &str,
+    vcs_type: vcs::VcsType,
 ) -> Result<PathBuf> {
     let dir = repo_dir(dwm_base, repo_name);
     fs::create_dir_all(&dir)?;
@@ -47,7 +47,7 @@ fn ensure_repo_dir(
     }
     let vcs_file = dir.join(".vcs-type");
     if !vcs_file.exists() {
-        fs::write(&vcs_file, vcs_type)?;
+        fs::write(&vcs_file, vcs_type.to_string())?;
     }
     Ok(dir)
 }
@@ -79,7 +79,7 @@ pub fn new_workspace(name: Option<String>, at: Option<&str>) -> Result<()> {
 fn new_workspace_inner(deps: &WorkspaceDeps, name: Option<String>, at: Option<&str>) -> Result<()> {
     let repo_name = deps.backend.repo_name_from(&deps.cwd)?;
     let root = deps.backend.root_from(&deps.cwd)?;
-    let dir = ensure_repo_dir(&deps.dwm_base, &repo_name, &root, deps.backend.vcs_name())?;
+    let dir = ensure_repo_dir(&deps.dwm_base, &repo_name, &root, deps.backend.vcs_type())?;
 
     let ws_name = match name {
         Some(n) => n,
@@ -458,7 +458,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     } else {
         main_info.description.clone()
     };
-    let vcs_type = deps.backend.vcs_name().to_string();
+    let vcs_type = deps.backend.vcs_type();
     entries.push(WorkspaceEntry {
         name: main_ws_name.to_string(),
         path: main_repo.clone(),
@@ -471,7 +471,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         is_stale: false,
         repo_name: None,
         main_repo_path: main_repo.clone(),
-        vcs_type: vcs_type.clone(),
+        vcs_type,
     });
 
     // Scan workspace dirs
@@ -526,7 +526,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             description,
             bookmarks: info.bookmarks,
             main_repo_path: main_repo.clone(),
-            vcs_type: vcs_type.clone(),
+            vcs_type,
         });
     }
 
@@ -550,7 +550,7 @@ pub struct WorkspaceEntry {
     pub is_stale: bool,
     pub repo_name: Option<String>,
     pub main_repo_path: PathBuf,
-    pub vcs_type: String,
+    pub vcs_type: vcs::VcsType,
 }
 
 /// Determine whether a workspace should be shown as stale.
@@ -901,8 +901,8 @@ mod tests {
             false
         }
 
-        fn vcs_name(&self) -> &'static str {
-            "mock"
+        fn vcs_type(&self) -> vcs::VcsType {
+            vcs::VcsType::Jj
         }
 
         fn main_workspace_name(&self) -> &'static str {
@@ -1700,7 +1700,7 @@ mod tests {
                 is_stale: false,
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
-                vcs_type: "jj".to_string(),
+                vcs_type: vcs::VcsType::Jj,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -1714,7 +1714,7 @@ mod tests {
                 is_stale: false,
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
-                vcs_type: "jj".to_string(),
+                vcs_type: vcs::VcsType::Jj,
             },
         ];
         // Should not panic; output goes to stderr

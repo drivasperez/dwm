@@ -1,5 +1,43 @@
 use anyhow::{Context, Result, bail};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsType {
+    Jj,
+    Git,
+}
+
+impl VcsType {
+    pub fn to_backend(self) -> Box<dyn VcsBackend> {
+        match self {
+            VcsType::Jj => Box::new(crate::jj::JjBackend),
+            VcsType::Git => Box::new(crate::git::GitBackend),
+        }
+    }
+}
+
+impl fmt::Display for VcsType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VcsType::Jj => write!(f, "jj"),
+            VcsType::Git => write!(f, "git"),
+        }
+    }
+}
+
+impl FromStr for VcsType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "jj" => Ok(VcsType::Jj),
+            "git" => Ok(VcsType::Git),
+            other => bail!("unknown VCS type '{}'", other),
+        }
+    }
+}
 
 /// VCS-level metadata for a single workspace/worktree as reported by the
 /// underlying VCS (jj or git).
@@ -94,8 +132,8 @@ pub trait VcsBackend {
     /// Return `true` if the workspace's changes have already been merged into
     /// the trunk branch (i.e. no un-merged commits exist).
     fn is_merged_into_trunk(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> bool;
-    /// Short identifier for the VCS (e.g. `"jj"` or `"git"`).
-    fn vcs_name(&self) -> &'static str;
+    /// VCS type for this backend.
+    fn vcs_type(&self) -> VcsType;
     /// Name of the primary workspace that lives in the original repo directory
     /// (e.g. `"default"` for jj, `"main-worktree"` for git).
     fn main_workspace_name(&self) -> &'static str;
@@ -138,20 +176,23 @@ pub fn detect(dir: &Path) -> Result<Box<dyn VcsBackend>> {
 /// Detect VCS from a dwm repo directory by reading the `.vcs-type` file.
 /// Defaults to jj for backward compatibility if the file doesn't exist.
 pub fn detect_from_dwm_dir(repo_dir: &Path) -> Result<Box<dyn VcsBackend>> {
-    let vcs_file = repo_dir.join(".vcs-type");
-    let vcs_type = if vcs_file.exists() {
-        std::fs::read_to_string(&vcs_file)
-            .with_context(|| format!("could not read {}", vcs_file.display()))?
-            .trim()
-            .to_string()
-    } else {
-        "jj".to_string()
-    };
+    let vcs_type = read_vcs_type(repo_dir)?;
+    Ok(vcs_type.to_backend())
+}
 
-    match vcs_type.as_str() {
-        "jj" => Ok(Box::new(crate::jj::JjBackend)),
-        "git" => Ok(Box::new(crate::git::GitBackend)),
-        other => bail!("unknown VCS type '{}' in {}", other, vcs_file.display()),
+/// Read the VcsType from a dwm repo directory's `.vcs-type` file.
+/// Defaults to Jj for backward compatibility if the file doesn't exist.
+pub fn read_vcs_type(repo_dir: &Path) -> Result<VcsType> {
+    let vcs_file = repo_dir.join(".vcs-type");
+    if vcs_file.exists() {
+        let content = std::fs::read_to_string(&vcs_file)
+            .with_context(|| format!("could not read {}", vcs_file.display()))?;
+        content
+            .trim()
+            .parse::<VcsType>()
+            .with_context(|| format!("in {}", vcs_file.display()))
+    } else {
+        Ok(VcsType::Jj)
     }
 }
 
@@ -198,6 +239,45 @@ pub fn parse_diff_stat_line(line: &str) -> Option<DiffStat> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vcs_type_from_str_jj() {
+        assert_eq!("jj".parse::<VcsType>().unwrap(), VcsType::Jj);
+    }
+
+    #[test]
+    fn vcs_type_from_str_git() {
+        assert_eq!("git".parse::<VcsType>().unwrap(), VcsType::Git);
+    }
+
+    #[test]
+    fn vcs_type_from_str_unknown() {
+        assert!("svn".parse::<VcsType>().is_err());
+    }
+
+    #[test]
+    fn vcs_type_display_roundtrip() {
+        assert_eq!(
+            VcsType::Jj.to_string().parse::<VcsType>().unwrap(),
+            VcsType::Jj
+        );
+        assert_eq!(
+            VcsType::Git.to_string().parse::<VcsType>().unwrap(),
+            VcsType::Git
+        );
+    }
+
+    #[test]
+    fn vcs_type_to_backend_jj() {
+        let backend = VcsType::Jj.to_backend();
+        assert_eq!(backend.vcs_type(), VcsType::Jj);
+    }
+
+    #[test]
+    fn vcs_type_to_backend_git() {
+        let backend = VcsType::Git.to_backend();
+        assert_eq!(backend.vcs_type(), VcsType::Git);
+    }
 
     #[test]
     fn parse_full_stat_line() {
@@ -276,7 +356,7 @@ mod tests {
         std::fs::create_dir(dir.path().join(".jj")).unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let backend = detect(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "jj");
+        assert_eq!(backend.vcs_type(), VcsType::Jj);
     }
 
     #[test]
@@ -284,7 +364,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let backend = detect(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "git");
+        assert_eq!(backend.vcs_type(), VcsType::Git);
     }
 
     #[test]
@@ -292,7 +372,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".jj")).unwrap();
         let backend = detect(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "jj");
+        assert_eq!(backend.vcs_type(), VcsType::Jj);
     }
 
     #[test]
@@ -305,7 +385,7 @@ mod tests {
     fn detect_from_dwm_dir_defaults_to_jj() {
         let dir = tempfile::tempdir().unwrap();
         let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "jj");
+        assert_eq!(backend.vcs_type(), VcsType::Jj);
     }
 
     #[test]
@@ -313,7 +393,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".vcs-type"), "git").unwrap();
         let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "git");
+        assert_eq!(backend.vcs_type(), VcsType::Git);
     }
 
     #[test]
@@ -321,7 +401,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".vcs-type"), "jj").unwrap();
         let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_name(), "jj");
+        assert_eq!(backend.vcs_type(), VcsType::Jj);
     }
 
     #[test]

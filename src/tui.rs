@@ -15,30 +15,17 @@ enum PreviewState {
     Hidden,
     Loading,
     Ready { log: String, diff_stat: String },
-    Error(String),
 }
 
 fn fetch_preview(
     main_repo_path: PathBuf,
     worktree_dir: PathBuf,
     ws_name: String,
-    vcs_type: String,
+    vcs_type: crate::vcs::VcsType,
     mailbox: Arc<Mutex<Option<PreviewState>>>,
 ) {
     std::thread::spawn(move || {
-        let backend: Box<dyn crate::vcs::VcsBackend + Send> = match vcs_type.as_str() {
-            "jj" => Box::new(crate::jj::JjBackend),
-            "git" => Box::new(crate::git::GitBackend),
-            _ => {
-                let _ = mailbox.lock().map(|mut m| {
-                    *m = Some(PreviewState::Error(format!(
-                        "unknown VCS type: {}",
-                        vcs_type
-                    )));
-                });
-                return;
-            }
-        };
+        let backend = vcs_type.to_backend();
 
         let log = backend.preview_log(&main_repo_path, &worktree_dir, &ws_name, 10);
         let diff_stat = backend.preview_diff_stat(&main_repo_path, &worktree_dir, &ws_name);
@@ -232,7 +219,7 @@ impl App {
                 entry.main_repo_path.clone(),
                 entry.path.clone(),
                 entry.name.clone(),
-                entry.vcs_type.clone(),
+                entry.vcs_type,
                 mailbox,
             );
         } else {
@@ -271,7 +258,6 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
     let content = match preview {
         PreviewState::Hidden => String::new(),
         PreviewState::Loading => "Loading...".to_string(),
-        PreviewState::Error(msg) => format!("Error: {}", msg),
         PreviewState::Ready { log, diff_stat } => {
             let mut text = String::new();
             if !diff_stat.is_empty() {
@@ -746,7 +732,7 @@ impl MultiRepoApp {
                 entry.main_repo_path.clone(),
                 entry.path.clone(),
                 entry.name.clone(),
-                entry.vcs_type.clone(),
+                entry.vcs_type,
                 mailbox,
             );
         } else {
@@ -1085,7 +1071,7 @@ mod tests {
             is_stale: false,
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
-            vcs_type: "jj".to_string(),
+            vcs_type: crate::vcs::VcsType::Jj,
         }
     }
 
@@ -1159,7 +1145,7 @@ mod tests {
             is_stale: false,
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
-            vcs_type: "jj".to_string(),
+            vcs_type: crate::vcs::VcsType::Jj,
         }
     }
 
@@ -1281,7 +1267,7 @@ mod tests {
             is_stale: false,
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
-            vcs_type: "jj".to_string(),
+            vcs_type: crate::vcs::VcsType::Jj,
         }
     }
 
