@@ -28,26 +28,17 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            loop {
-                let entries = workspace::list_workspace_entries()?;
-                match tui::run_picker(entries)? {
-                    Some(tui::PickerResult::Selected(path)) => {
-                        println!("{}", path);
-                        break;
-                    }
-                    Some(tui::PickerResult::CreateNew(name)) => {
-                        workspace::new_workspace(name, None)?;
-                        break;
-                    }
-                    Some(tui::PickerResult::Delete(name)) => {
-                        let redirected = workspace::delete_workspace(Some(name))?;
-                        if redirected {
-                            break;
-                        }
-                        continue;
-                    }
-                    None => break,
+            let entries = workspace::list_workspace_entries()?;
+            match tui::run_picker(
+                entries,
+                |name| workspace::delete_workspace_quiet(Some(name.to_string())),
+                workspace::list_workspace_entries,
+            )? {
+                Some(tui::PickerResult::Selected(path)) => println!("{}", path),
+                Some(tui::PickerResult::CreateNew(name)) => {
+                    workspace::new_workspace(name, None)?;
                 }
+                None => {}
             }
             Ok(())
         }

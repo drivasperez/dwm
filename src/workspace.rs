@@ -133,7 +133,41 @@ pub fn delete_workspace(name: Option<String>) -> Result<bool> {
         cwd,
         dwm_base,
     };
-    if let Some(redirect) = delete_workspace_inner(&deps, name)? {
+    if let Some(redirect) = delete_workspace_inner(&deps, name, false)? {
+        println!("{}", redirect.display());
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Like [`delete_workspace`] but suppresses progress messages to stderr.
+/// Used by the TUI which owns the alternate screen on stderr.
+pub fn delete_workspace_quiet(name: Option<String>) -> Result<bool> {
+    let cwd = std::env::current_dir()?;
+    let dwm_base = dwm_base_dir()?;
+
+    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        let repo_name_str = relative
+            .components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let rd = repo_dir(&dwm_base, &repo_name_str);
+        vcs::detect_from_dwm_dir(&rd)?
+    } else {
+        vcs::detect(&cwd)?
+    };
+
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        dwm_base,
+    };
+    if let Some(redirect) = delete_workspace_inner(&deps, name, true)? {
         println!("{}", redirect.display());
         Ok(true)
     } else {
@@ -142,7 +176,13 @@ pub fn delete_workspace(name: Option<String>) -> Result<bool> {
 }
 
 /// Returns the path the shell should cd to if cwd was inside the deleted workspace.
-fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<Option<PathBuf>> {
+/// When `quiet` is true, progress messages to stderr are suppressed (used by
+/// the TUI which owns the alternate screen on stderr).
+fn delete_workspace_inner(
+    deps: &WorkspaceDeps,
+    name: Option<String>,
+    quiet: bool,
+) -> Result<Option<PathBuf>> {
     let (repo_name_str, ws_name) = match name {
         Some(name) => {
             let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
@@ -186,15 +226,21 @@ fn delete_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<
 
     let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
-    eprintln!("forgetting workspace '{}'...", ws_name);
+    if !quiet {
+        eprintln!("forgetting workspace '{}'...", ws_name);
+    }
     deps.backend
         .workspace_remove(&main_repo, &ws_name, &ws_path)?;
 
     if ws_path.exists() {
-        eprintln!("removing {}...", ws_path.display());
+        if !quiet {
+            eprintln!("removing {}...", ws_path.display());
+        }
         fs::remove_dir_all(&ws_path)?;
     }
-    eprintln!("workspace '{}' deleted", ws_name);
+    if !quiet {
+        eprintln!("workspace '{}' deleted", ws_name);
+    }
 
     if is_inside(&deps.cwd, &ws_path) {
         Ok(Some(main_repo))
@@ -1143,7 +1189,7 @@ mod tests {
             dwm_base: dwm_base.clone(),
         };
 
-        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string())).unwrap();
+        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string()), false).unwrap();
         assert!(
             redirect.is_none(),
             "should not redirect when cwd is outside workspace"
@@ -1187,7 +1233,7 @@ mod tests {
             dwm_base,
         };
 
-        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string())).unwrap();
+        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string()), false).unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
         assert_eq!(redirect, main_repo);
     }
@@ -1211,7 +1257,7 @@ mod tests {
         };
 
         // No name given — should infer repo=myrepo, ws=inferred-ws from cwd
-        let _redirected = delete_workspace_inner(&deps, None).unwrap();
+        let _redirected = delete_workspace_inner(&deps, None, false).unwrap();
 
         let calls = calls.lock().unwrap();
         match &calls[0] {
@@ -1237,7 +1283,8 @@ mod tests {
             dwm_base,
         };
 
-        let err = delete_workspace_inner(&deps, Some("nonexistent".to_string())).unwrap_err();
+        let err =
+            delete_workspace_inner(&deps, Some("nonexistent".to_string()), false).unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
     }
 
@@ -1879,7 +1926,7 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps3, Some("test-ws".to_string())).unwrap();
+        delete_workspace_inner(&deps3, Some("test-ws".to_string()), false).unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"
@@ -2193,7 +2240,7 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps3, Some("test-ws".to_string())).unwrap();
+        delete_workspace_inner(&deps3, Some("test-ws".to_string()), false).unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"
@@ -2266,7 +2313,7 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps4, Some("my cool feature".to_string())).unwrap();
+        delete_workspace_inner(&deps4, Some("my cool feature".to_string()), false).unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"

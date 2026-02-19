@@ -43,8 +43,6 @@ pub enum PickerResult {
     Selected(String),
     /// User wants to create a new workspace with an optional explicit name.
     CreateNew(Option<String>),
-    /// User wants to delete the named workspace.
-    Delete(String),
 }
 
 /// Column by which the workspace table is sorted.
@@ -144,6 +142,8 @@ struct App {
     preview: PreviewState,
     preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
     table_state: TableState,
+    /// Transient status message shown in the help bar (e.g. after deletion).
+    status_message: Option<String>,
 }
 
 impl App {
@@ -165,6 +165,7 @@ impl App {
             preview: PreviewState::Hidden,
             preview_mailbox: Arc::new(Mutex::new(None)),
             table_state: TableState::default().with_selected(0),
+            status_message: None,
         }
     }
 
@@ -482,37 +483,55 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     // Render help bar at bottom
     if let Some(help_area) = help_area {
-        let help_text = match app.mode {
-            Mode::InputName => " Enter: create  Esc: cancel".to_string(),
-            Mode::Filter => format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf),
-            Mode::ConfirmDelete(ref name) => format!(" Delete '{}'? y: confirm  n: cancel", name),
-            Mode::Browse if app.on_create_row() => {
-                " Enter: create (auto-name)  type: name it  q: quit".to_string()
-            }
-            Mode::Browse => {
-                let filter_info = if !app.filter_buf.is_empty() {
-                    format!("  [filter: \"{}\"]", app.filter_buf)
-                } else {
-                    String::new()
-                };
-                format!(
-                    " j/k: navigate  /: filter  s: sort ({})  p: preview  d: delete  Enter: select  q: quit{}",
-                    app.sort_mode.label(),
-                    filter_info
-                )
-            }
+        let (help_text, help_style) = if let Some(ref msg) = app.status_message {
+            (format!(" {}", msg), Style::default().fg(Color::Green))
+        } else {
+            let text = match app.mode {
+                Mode::InputName => " Enter: create  Esc: cancel".to_string(),
+                Mode::Filter => {
+                    format!(" filter: {}▏  Enter: apply  Esc: clear", app.filter_buf)
+                }
+                Mode::ConfirmDelete(ref name) => {
+                    format!(" Delete '{}'? y: confirm  n: cancel", name)
+                }
+                Mode::Browse if app.on_create_row() => {
+                    " Enter: create (auto-name)  type: name it  q: quit".to_string()
+                }
+                Mode::Browse => {
+                    let filter_info = if !app.filter_buf.is_empty() {
+                        format!("  [filter: \"{}\"]", app.filter_buf)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        " j/k: navigate  /: filter  s: sort ({})  p: preview  d: delete  Enter: select  q: quit{}",
+                        app.sort_mode.label(),
+                        filter_info
+                    )
+                }
+            };
+            (text, Style::default().fg(Color::DarkGray))
         };
-        let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
+        let help = Paragraph::new(help_text).style(help_style);
         frame.render_widget(help, help_area);
     }
 }
 
 /// Event loop for the single-repo picker. `next_event` is injectable for
 /// testing (pass a closure that returns synthetic key events).
+///
+/// `on_delete` performs the workspace deletion — returns `Ok(true)` if the
+/// caller already printed a redirect path (picker should exit), `Ok(false)`
+/// if the picker should refresh and continue.
+///
+/// `list_entries` is called after a successful non-redirect deletion to
+/// refresh the entry list.
 fn run_picker_inner<B: Backend>(
     terminal: &mut Terminal<B>,
     entries: Vec<WorkspaceEntry>,
     next_event: &mut dyn FnMut() -> Result<Option<Event>>,
+    on_delete: &mut dyn FnMut(&str) -> Result<bool>,
+    list_entries: &mut dyn FnMut() -> Result<Vec<WorkspaceEntry>>,
 ) -> Result<Option<PickerResult>> {
     let mut app = App::new(entries);
 
@@ -533,6 +552,7 @@ fn run_picker_inner<B: Backend>(
             }
 
             let prev_selected = app.selected;
+            app.status_message = None;
 
             match app.mode {
                 Mode::Browse => match key.code {
@@ -629,7 +649,25 @@ fn run_picker_inner<B: Backend>(
                 Mode::ConfirmDelete(ref name) => match key.code {
                     KeyCode::Char('y') => {
                         let name = name.clone();
-                        return Ok(Some(PickerResult::Delete(name)));
+                        app.mode = Mode::Browse;
+                        let redirected = on_delete(&name)?;
+                        if redirected {
+                            return Ok(None);
+                        }
+                        // Refresh entries after deletion
+                        let new_entries = list_entries()?;
+                        if new_entries.is_empty() {
+                            return Ok(None);
+                        }
+                        app.entries = new_entries;
+                        sort_entries(&mut app.entries, app.sort_mode);
+                        app.recompute_filter();
+                        if app.selected >= app.total_rows() {
+                            app.selected = app.total_rows().saturating_sub(1);
+                        }
+                        app.sync_table_state();
+                        app.trigger_preview_fetch();
+                        app.status_message = Some(format!("workspace '{}' deleted", name));
                     }
                     KeyCode::Char('n') | KeyCode::Esc => {
                         app.mode = Mode::Browse;
@@ -650,7 +688,18 @@ fn run_picker_inner<B: Backend>(
 ///
 /// Switches the terminal to an alternate screen in raw mode, runs the event
 /// loop, then restores the terminal before returning.
-pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
+///
+/// `on_delete` is called when the user confirms deletion of a workspace.
+/// It should return `Ok(true)` if a redirect path was printed (picker exits),
+/// or `Ok(false)` to refresh and continue.
+///
+/// `list_entries` is called after a non-redirect deletion to get the fresh
+/// entry list.
+pub fn run_picker(
+    entries: Vec<WorkspaceEntry>,
+    mut on_delete: impl FnMut(&str) -> Result<bool>,
+    mut list_entries: impl FnMut() -> Result<Vec<WorkspaceEntry>>,
+) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
         eprintln!("no workspaces found");
         return Ok(None);
@@ -662,13 +711,19 @@ pub fn run_picker(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> 
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_picker_inner(&mut terminal, entries, &mut || {
-        if event::poll(std::time::Duration::from_millis(100))? {
-            Ok(Some(event::read()?))
-        } else {
-            Ok(None)
-        }
-    });
+    let result = run_picker_inner(
+        &mut terminal,
+        entries,
+        &mut || {
+            if event::poll(std::time::Duration::from_millis(100))? {
+                Ok(Some(event::read()?))
+            } else {
+                Ok(None)
+            }
+        },
+        &mut on_delete,
+        &mut list_entries,
+    );
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -1257,13 +1312,29 @@ mod tests {
         entries: Vec<WorkspaceEntry>,
         keys: Vec<KeyCode>,
     ) -> Result<Option<PickerResult>> {
+        run_picker_with_keys_and_callbacks(entries, keys, &mut |_| Ok(false), &mut || Ok(vec![]))
+    }
+
+    /// Like `run_picker_with_keys` but with custom delete/refresh callbacks.
+    fn run_picker_with_keys_and_callbacks(
+        entries: Vec<WorkspaceEntry>,
+        keys: Vec<KeyCode>,
+        on_delete: &mut dyn FnMut(&str) -> Result<bool>,
+        list_entries: &mut dyn FnMut() -> Result<Vec<WorkspaceEntry>>,
+    ) -> Result<Option<PickerResult>> {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
-        run_picker_inner(&mut terminal, entries, &mut || match key_iter.next() {
-            Some(code) => Ok(Some(key(code))),
-            None => Ok(Some(key(KeyCode::Esc))),
-        })
+        run_picker_inner(
+            &mut terminal,
+            entries,
+            &mut || match key_iter.next() {
+                Some(code) => Ok(Some(key(code))),
+                None => Ok(Some(key(KeyCode::Esc))),
+            },
+            on_delete,
+            list_entries,
+        )
     }
 
     /// Drive run_picker_multi_repo_inner with a sequence of key events.
@@ -1424,17 +1495,110 @@ mod tests {
 
     #[test]
     fn tui_delete_flow() {
+        // After deletion the picker should continue (not exit), and the
+        // refreshed list should be used. We verify by selecting the
+        // remaining entry.
         let entries = vec![
             make_named_entry_ranked("ws1", "/tmp/ws1", 0),
             make_named_entry_ranked("ws2", "/tmp/ws2", 1),
         ];
-        // d to initiate delete on ws1 (first/selected), y to confirm
-        let result =
-            run_picker_with_keys(entries, vec![KeyCode::Char('d'), KeyCode::Char('y')]).unwrap();
+        let mut deleted_name = String::new();
+        let result = run_picker_with_keys_and_callbacks(
+            entries,
+            vec![
+                KeyCode::Char('d'), // initiate delete on ws1
+                KeyCode::Char('y'), // confirm
+                KeyCode::Enter,     // select first entry (now ws2)
+            ],
+            &mut |name| {
+                deleted_name = name.to_string();
+                Ok(false) // no redirect
+            },
+            &mut || {
+                // Return refreshed list with ws1 removed
+                Ok(vec![make_named_entry_ranked("ws2", "/tmp/ws2", 0)])
+            },
+        )
+        .unwrap();
+        assert_eq!(deleted_name, "ws1");
         match result {
-            Some(PickerResult::Delete(name)) => assert_eq!(name, "ws1"),
-            other => panic!("expected Delete(ws1), got {:?}", other),
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws2"),
+            other => panic!(
+                "expected Selected(ws2) after delete+refresh, got {:?}",
+                other
+            ),
         }
+    }
+
+    #[test]
+    fn tui_delete_redirect_exits_picker() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let result = run_picker_with_keys_and_callbacks(
+            entries,
+            vec![KeyCode::Char('d'), KeyCode::Char('y')],
+            &mut |_| Ok(true), // redirect happened
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+        // Picker should exit with None (redirect path already printed)
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_delete_empty_list_exits_picker() {
+        let entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        let result = run_picker_with_keys_and_callbacks(
+            entries,
+            vec![KeyCode::Char('d'), KeyCode::Char('y')],
+            &mut |_| Ok(false),
+            &mut || Ok(vec![]), // no entries left
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tui_delete_shows_status_message() {
+        // After deletion, the status message should appear in the rendered help bar.
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut keys = vec![
+            KeyCode::Char('d'), // initiate delete on ws1
+            KeyCode::Char('y'), // confirm
+        ]
+        .into_iter();
+        // Run one iteration that processes 'd', then 'y' which triggers delete+refresh,
+        // then we stop and inspect the buffer.
+        run_picker_inner(
+            &mut terminal,
+            entries,
+            &mut || match keys.next() {
+                Some(code) => Ok(Some(key(code))),
+                // After processing keys, send Esc to exit so we can check the last frame
+                None => Ok(Some(key(KeyCode::Esc))),
+            },
+            &mut |_| Ok(false),
+            &mut || Ok(vec![make_named_entry_ranked("ws2", "/tmp/ws2", 0)]),
+        )
+        .unwrap();
+        // The status message "workspace 'ws1' deleted" should have been rendered
+        // in the frame right after deletion (before the Esc cleared it).
+        // Since Esc exits immediately without redraw, the last rendered frame
+        // still has the status message.
+        let lines = buffer_lines(&terminal);
+        let all_text = lines.join("\n");
+        assert!(
+            all_text.contains("workspace 'ws1' deleted"),
+            "expected status message in help bar, got:\n{}",
+            all_text
+        );
     }
 
     #[test]
