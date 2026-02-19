@@ -143,6 +143,7 @@ struct App {
     show_preview: bool,
     preview: PreviewState,
     preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
+    table_state: TableState,
 }
 
 impl App {
@@ -163,6 +164,7 @@ impl App {
             show_preview: false,
             preview: PreviewState::Hidden,
             preview_mailbox: Arc::new(Mutex::new(None)),
+            table_state: TableState::default().with_selected(0),
         }
     }
 
@@ -196,6 +198,7 @@ impl App {
         if total > 0 {
             self.selected = (self.selected + 1) % total;
         }
+        self.sync_table_state();
     }
 
     /// Move the cursor up one row (wrapping).
@@ -204,6 +207,12 @@ impl App {
         if total > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
         }
+        self.sync_table_state();
+    }
+
+    /// Keep `table_state` selection in sync with `selected`.
+    fn sync_table_state(&mut self) {
+        self.table_state.select(Some(self.selected));
     }
 
     fn trigger_preview_fetch(&mut self) {
@@ -251,6 +260,7 @@ impl App {
         if self.selected >= self.total_rows() {
             self.selected = self.total_rows().saturating_sub(1);
         }
+        self.sync_table_state();
     }
 }
 
@@ -294,7 +304,7 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
 }
 
 /// Render the single-repo workspace table and help bar into `frame`.
-fn render(frame: &mut Frame, app: &App) {
+fn render(frame: &mut Frame, app: &mut App) {
     let full_area = frame.area();
 
     // Reserve 1 line at the bottom for help bar
@@ -331,8 +341,7 @@ fn render(frame: &mut Frame, app: &App) {
     let visible = app.visible_entries();
     let mut rows: Vec<Row> = visible
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
+        .map(|entry| {
             let name_text = if entry.is_main {
                 format!("{} (main)", entry.name)
             } else if entry.is_stale {
@@ -368,12 +377,6 @@ fn render(frame: &mut Frame, app: &App) {
                     }
                 };
 
-            let style = if i == app.selected {
-                Style::default().bg(Color::Rgb(40, 40, 60))
-            } else {
-                Style::default()
-            };
-
             // Use dim styling for stale workspaces
             let dim = entry.is_stale;
             let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
@@ -399,7 +402,6 @@ fn render(frame: &mut Frame, app: &App) {
                 Cell::from(time_text).style(Style::default().fg(time_fg)),
                 Cell::from(changes_text).style(Style::default().fg(changes_fg)),
             ])
-            .style(style)
         })
         .collect();
 
@@ -451,12 +453,14 @@ fn render(frame: &mut Frame, app: &App) {
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
 
-    frame.render_widget(table, table_area);
+    frame.render_stateful_widget(table, table_area, &mut app.table_state);
 
     // Overlay a full-width input line on top of the create row
     if input_active {
-        // Row y = table top border (1) + header (1) + number of data rows
-        let create_row_y = table_area.y + 2 + app.filtered_indices.len() as u16;
+        // Row y = table top border (1) + header (1) + (row_index - scroll_offset)
+        let scroll_offset = app.table_state.offset() as u16;
+        let create_row_index = app.filtered_indices.len() as u16;
+        let create_row_y = table_area.y + 2 + create_row_index.saturating_sub(scroll_offset);
         if create_row_y < table_area.bottom() {
             let input_area = Rect::new(
                 table_area.x + 1, // inside left border
@@ -516,7 +520,7 @@ fn run_picker_inner<B: Backend>(
         // Drain preview mailbox before drawing
         app.drain_preview_mailbox();
 
-        terminal.draw(|f| render(f, &app))?;
+        terminal.draw(|f| render(f, &mut app))?;
 
         let event = next_event()?;
         let Some(event) = event else {
@@ -556,6 +560,7 @@ fn run_picker_inner<B: Backend>(
                         sort_entries(&mut app.entries, app.sort_mode);
                         app.recompute_filter();
                         app.selected = 0;
+                        app.sync_table_state();
                     }
                     KeyCode::Char('/') => {
                         app.mode = Mode::Filter;
@@ -686,6 +691,7 @@ struct MultiRepoApp {
     show_preview: bool,
     preview: PreviewState,
     preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
+    table_state: TableState,
 }
 
 impl MultiRepoApp {
@@ -704,6 +710,7 @@ impl MultiRepoApp {
             show_preview: false,
             preview: PreviewState::Hidden,
             preview_mailbox: Arc::new(Mutex::new(None)),
+            table_state: TableState::default().with_selected(0),
         }
     }
 
@@ -730,6 +737,7 @@ impl MultiRepoApp {
         if total > 0 {
             self.selected = (self.selected + 1) % total;
         }
+        self.sync_table_state();
     }
 
     /// Move the cursor up one row (wrapping).
@@ -738,6 +746,11 @@ impl MultiRepoApp {
         if total > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(total - 1);
         }
+        self.sync_table_state();
+    }
+
+    fn sync_table_state(&mut self) {
+        self.table_state.select(Some(self.selected));
     }
 
     fn trigger_preview_fetch(&mut self) {
@@ -785,11 +798,12 @@ impl MultiRepoApp {
         if self.selected >= self.total_rows() {
             self.selected = self.total_rows().saturating_sub(1);
         }
+        self.sync_table_state();
     }
 }
 
 /// Render the multi-repo workspace table and help bar into `frame`.
-fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
+fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
     let full_area = frame.area();
 
     // Reserve 1 line at the bottom for help bar
@@ -827,8 +841,7 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
     let visible = app.visible_entries();
     let rows: Vec<Row> = visible
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
+        .map(|entry| {
             let repo_text = entry.repo_name.as_deref().unwrap_or("").to_string();
 
             let name_text = if entry.is_main {
@@ -863,12 +876,6 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
                     }
                 };
 
-            let style = if i == app.selected {
-                Style::default().bg(Color::Rgb(40, 40, 60))
-            } else {
-                Style::default()
-            };
-
             let dim = entry.is_stale;
             let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
             let change_fg = if dim { Color::DarkGray } else { Color::Magenta };
@@ -894,7 +901,6 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
                 Cell::from(time_text).style(Style::default().fg(time_fg)),
                 Cell::from(changes_text).style(Style::default().fg(changes_fg)),
             ])
-            .style(style)
         })
         .collect();
 
@@ -918,7 +924,7 @@ fn render_multi_repo(frame: &mut Frame, app: &MultiRepoApp) {
         )
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
 
-    frame.render_widget(table, table_area);
+    frame.render_stateful_widget(table, table_area, &mut app.table_state);
 
     // Render preview pane if visible
     if let Some(preview_area) = preview_area {
@@ -957,7 +963,7 @@ fn run_picker_multi_repo_inner<B: Backend>(
         // Drain preview mailbox before drawing
         app.drain_preview_mailbox();
 
-        terminal.draw(|f| render_multi_repo(f, &app))?;
+        terminal.draw(|f| render_multi_repo(f, &mut app))?;
 
         let event = next_event()?;
         let Some(event) = event else {
@@ -1001,6 +1007,7 @@ fn run_picker_multi_repo_inner<B: Backend>(
                         sort_entries(&mut app.entries, app.sort_mode);
                         app.recompute_filter();
                         app.selected = 0;
+                        app.sync_table_state();
                     }
                     KeyCode::Char('/') => {
                         app.filter_mode = true;
@@ -1657,12 +1664,92 @@ mod tests {
         assert!(matches!(app.preview, PreviewState::Hidden));
     }
 
+    /// Helper to extract all visible text from a terminal buffer as one string per row.
+    fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tui_table_scrolls_with_cursor() {
+        // Terminal height 10: border(1) + header(1) + 6 visible rows + border(1) + help(1) = 10
+        // Create 20 entries so most won't fit on screen
+        let entries: Vec<WorkspaceEntry> = (0..20)
+            .map(|i| {
+                make_named_entry_ranked(&format!("ws-{:02}", i), &format!("/tmp/ws-{:02}", i), i)
+            })
+            .collect();
+
+        let mut app = App::new(entries);
+
+        // Navigate to the last data entry (index 19), which is beyond visible area
+        for _ in 0..19 {
+            app.next();
+        }
+        assert_eq!(app.selected, 19);
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let all_text = lines.join("\n");
+
+        // The selected entry "ws-19" should be visible after scrolling
+        assert!(
+            all_text.contains("ws-19"),
+            "selected entry 'ws-19' should be visible after scrolling, buffer:\n{}",
+            all_text,
+        );
+    }
+
+    #[test]
+    fn tui_multi_table_scrolls_with_cursor() {
+        let entries: Vec<WorkspaceEntry> = (0..20)
+            .map(|i| {
+                let mut e = make_named_entry_ranked(
+                    &format!("ws-{:02}", i),
+                    &format!("/tmp/ws-{:02}", i),
+                    i,
+                );
+                e.repo_name = Some("repo".to_string());
+                e
+            })
+            .collect();
+
+        let mut app = MultiRepoApp::new(entries);
+
+        for _ in 0..19 {
+            app.next();
+        }
+        assert_eq!(app.selected, 19);
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_multi_repo(f, &mut app)).unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let all_text = lines.join("\n");
+
+        assert!(
+            all_text.contains("ws-19"),
+            "selected entry 'ws-19' should be visible after scrolling, buffer:\n{}",
+            all_text,
+        );
+    }
+
     #[test]
     fn tui_help_bar_shows_preview_hint() {
-        let app = App::new(vec![make_named_entry("ws1", "/tmp/ws1")]);
+        let mut app = App::new(vec![make_named_entry("ws1", "/tmp/ws1")]);
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &app)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Check the last line of the buffer for the help text
         let last_row = buf.area.height - 1;
