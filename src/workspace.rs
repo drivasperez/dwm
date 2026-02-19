@@ -2214,6 +2214,79 @@ mod tests {
     }
 
     #[test]
+    fn e2e_jj_workspace_with_spaces_in_name() {
+        assert!(jj_available(), "jj must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_jj_repo(&repo_path);
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir_jj(tmp.path(), &dir_name, &main_repo);
+
+        let backend = crate::jj::JjBackend;
+        let deps = WorkspaceDeps {
+            backend: Box::new(backend),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+
+        // Create a workspace with spaces in its name
+        new_workspace_inner(&deps, Some("my cool feature".to_string()), None).unwrap();
+        let ws_dir = dwm_base.join(format!("{}/my cool feature", dir_name));
+        assert!(ws_dir.exists(), "workspace dir should exist after creation");
+
+        // List and verify it shows up
+        let backend2 = crate::jj::JjBackend;
+        let deps2 = WorkspaceDeps {
+            backend: Box::new(backend2),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        let entries = list_workspace_entries_inner(&deps2).unwrap();
+        assert!(
+            entries.iter().any(|e| e.name == "my cool feature"),
+            "workspace with spaces should appear in listing, got: {:?}",
+            entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+
+        // Switch to the workspace
+        let backend3 = crate::jj::JjBackend;
+        let deps3 = WorkspaceDeps {
+            backend: Box::new(backend3),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        let switch_path = switch_workspace_inner(&deps3, "my cool feature").unwrap();
+        assert_eq!(switch_path, ws_dir);
+
+        // Delete the workspace
+        let backend4 = crate::jj::JjBackend;
+        let deps4 = WorkspaceDeps {
+            backend: Box::new(backend4),
+            cwd: main_repo.clone(),
+            dwm_base: dwm_base.clone(),
+        };
+        delete_workspace_inner(&deps4, Some("my cool feature".to_string())).unwrap();
+        assert!(
+            !ws_dir.exists(),
+            "workspace dir should be removed after deletion"
+        );
+
+        // Verify it's gone from listing
+        let backend5 = crate::jj::JjBackend;
+        let deps5 = WorkspaceDeps {
+            backend: Box::new(backend5),
+            cwd: main_repo,
+            dwm_base,
+        };
+        let entries = list_workspace_entries_inner(&deps5).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "my cool feature"),
+            "workspace with spaces should not appear after deletion"
+        );
+    }
+
+    #[test]
     fn e2e_jj_workspace_with_changes() {
         assert!(jj_available(), "jj must be installed to run this test");
         let tmp = tempfile::tempdir().unwrap();

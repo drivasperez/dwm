@@ -98,14 +98,25 @@ fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
     Ok(results)
 }
 
+/// Format a workspace name as a jj revset operand, quoting it if it contains
+/// characters that are not valid in a bare identifier (e.g. spaces).
+fn revset_ws(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        format!("{}@", name)
+    } else {
+        format!("`{}`@", name)
+    }
+}
+
 /// Walk the ancestor chain of `workspace_name@` and return the description of
 /// the most recent commit that has a non-empty message. Returns an empty string
 /// when no such ancestor exists or jj returns an error.
 fn latest_description(dir: &Path, workspace_name: &str) -> String {
-    let revset = format!(
-        r#"latest(ancestors({name}@) & description(glob:"?*"))"#,
-        name = workspace_name
-    );
+    let ws_at = revset_ws(workspace_name);
+    let revset = format!(r#"latest(ancestors({ws_at}) & description(glob:"?*"))"#,);
     let result = run_jj_in(
         dir,
         &[
@@ -211,7 +222,7 @@ impl VcsBackend for JjBackend {
         let to = if ws_name == "default" {
             "@".to_string()
         } else {
-            format!("{}@", ws_name)
+            revset_ws(ws_name)
         };
         diff_stat(repo_dir, "trunk()", &to)
     }
@@ -224,7 +235,7 @@ impl VcsBackend for JjBackend {
         let revset = if ws_name == "default" {
             "trunk()..@".to_string()
         } else {
-            format!("trunk()..{}@", ws_name)
+            format!("trunk()..{}", revset_ws(ws_name))
         };
         match run_jj_in(
             repo_dir,
@@ -253,7 +264,7 @@ impl VcsBackend for JjBackend {
         let ancestor_rev = if ws_name == "default" {
             "ancestors(@)".to_string()
         } else {
-            format!("ancestors({}@)", ws_name)
+            format!("ancestors({})", revset_ws(ws_name))
         };
         let limit_str = limit.to_string();
         run_jj_in(
@@ -267,7 +278,7 @@ impl VcsBackend for JjBackend {
         let to = if ws_name == "default" {
             "@".to_string()
         } else {
-            format!("{}@", ws_name)
+            revset_ws(ws_name)
         };
         run_jj_in(
             repo_dir,
@@ -319,5 +330,35 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1.description, "first line\nsecond line");
         assert_eq!(result[0].1.bookmarks, vec!["bookmark1"]);
+    }
+
+    #[test]
+    fn parse_workspace_info_name_with_spaces() {
+        let output = "my feature\0abc12345\0some description\0main\0\n";
+        let result = parse_workspace_info(output).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "my feature");
+        assert_eq!(result[0].1.change_id, "abc12345");
+        assert_eq!(result[0].1.description, "some description");
+    }
+
+    #[test]
+    fn revset_ws_simple_name() {
+        assert_eq!(revset_ws("feature"), "feature@");
+        assert_eq!(revset_ws("default"), "default@");
+        assert_eq!(revset_ws("my-branch"), "my-branch@");
+        assert_eq!(revset_ws("with_underscore"), "with_underscore@");
+    }
+
+    #[test]
+    fn revset_ws_name_with_spaces() {
+        assert_eq!(revset_ws("my feature"), "`my feature`@");
+        assert_eq!(revset_ws("work in progress"), "`work in progress`@");
+    }
+
+    #[test]
+    fn revset_ws_name_with_special_chars() {
+        assert_eq!(revset_ws("feat/login"), "`feat/login`@");
+        assert_eq!(revset_ws("fix.bug"), "`fix.bug`@");
     }
 }
