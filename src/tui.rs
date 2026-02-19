@@ -411,12 +411,15 @@ fn render(frame: &mut Frame, app: &App) {
         Style::default()
     };
 
-    let create_name = if app.mode == Mode::InputName && create_row_selected {
-        format!("Name: {}_", app.input_buf)
+    let input_active = app.mode == Mode::InputName && create_row_selected;
+
+    // Always add the create row to the table so it occupies the right space
+    let create_name = if input_active {
+        // Placeholder text that will be painted over by the overlay
+        String::new()
     } else {
         "+ Create new".to_string()
     };
-
     rows.push(
         Row::new(vec![
             Cell::from(create_name).style(Style::default().fg(Color::Green)),
@@ -449,6 +452,24 @@ fn render(frame: &mut Frame, app: &App) {
         .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 60)));
 
     frame.render_widget(table, table_area);
+
+    // Overlay a full-width input line on top of the create row
+    if input_active {
+        // Row y = table top border (1) + header (1) + number of data rows
+        let create_row_y = table_area.y + 2 + app.filtered_indices.len() as u16;
+        if create_row_y < table_area.bottom() {
+            let input_area = Rect::new(
+                table_area.x + 1, // inside left border
+                create_row_y,
+                table_area.width.saturating_sub(2), // inside both borders
+                1,
+            );
+            let input_text = format!("Name: {}_", app.input_buf);
+            let input_line = Paragraph::new(input_text)
+                .style(Style::default().fg(Color::Green).bg(Color::Rgb(40, 40, 60)));
+            frame.render_widget(input_line, input_area);
+        }
+    }
 
     // Render preview pane if visible
     if let Some(preview_area) = preview_area {
