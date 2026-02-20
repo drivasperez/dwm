@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "dwm", about = "Dan's Workspace Manager")]
+#[command(name = "dwm", about = "Dan's Workspace Manager", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -45,6 +45,8 @@ pub enum Commands {
         /// Workspace name to delete
         name: Option<String>,
     },
+    /// Print the current version
+    Version,
     /// Print shell integration wrapper
     ShellSetup {
         /// Emit POSIX (bash/zsh) wrapper
@@ -217,6 +219,18 @@ mod tests {
     fn shell_setup_mutually_exclusive_flags() {
         let err = Cli::try_parse_from(["dwm", "shell-setup", "--bash", "--fish"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn version_subcommand_parses() {
+        let cli = Cli::try_parse_from(["dwm", "version"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Version)));
+    }
+
+    #[test]
+    fn version_flag_is_recognized() {
+        let err = Cli::try_parse_from(["dwm", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
     #[test]

@@ -59,6 +59,8 @@ dwm status              # non-interactive workspace summary
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
+dwm version             # print the current version
+dwm --version           # same, as a flag
 ```
 
 ## Build
