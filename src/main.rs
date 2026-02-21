@@ -52,6 +52,10 @@ fn main() -> Result<()> {
         Commands::Switch { name } => workspace::switch_workspace(&name),
         Commands::Rename { name, new_name } => workspace::rename_workspace(name, new_name),
         Commands::Delete { name } => workspace::delete_workspace(name).map(|_| ()),
+        Commands::Version => {
+            println!("dwm {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Commands::ShellSetup {
             posix,
             bash,

@@ -2,6 +2,11 @@ use anyhow::Result;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Subcommands whose stdout may be a workspace path that the shell wrapper
+/// should `cd` into. This is the single source of truth — both the POSIX and
+/// fish wrapper generators read from this list.
+pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Bash,
@@ -34,7 +39,7 @@ impl Shell {
         }
     }
 
-    fn function_output(&self) -> &'static str {
+    fn function_output(&self) -> String {
         match self {
             Shell::Fish => fish_function(),
             Shell::Bash | Shell::Zsh => posix_function(),
@@ -43,34 +48,43 @@ impl Shell {
 }
 
 /// Returns the POSIX shell function definition that wraps the `dwm` binary.
-/// When the binary prints a directory path to stdout the wrapper `cd`s into it;
-/// otherwise it passes the output through to the caller.
-fn posix_function() -> &'static str {
-    r#"dwm() {
-    local output
-    output="$(command dwm "$@")"
-    local exit_code=$?
-    if [ $exit_code -eq 0 ] && [ -n "$output" ] && [ -d "$output" ]; then
-        cd "$output" || return 1
-    elif [ -n "$output" ]; then
-        echo "$output"
-    fi
-    return $exit_code
-}"#
+/// Subcommands listed in [`CD_SUBCOMMANDS`] (plus the bare invocation) capture
+/// stdout and `cd` into the result. All other subcommands run directly.
+fn posix_function() -> String {
+    let cases = CD_SUBCOMMANDS.join("|");
+    format!(
+        r#"dwm() {{
+    case "$1" in
+        {cases}|"")
+            local dir
+            dir="$(command dwm "$@")" || return $?
+            [ -n "$dir" ] && cd "$dir"
+            ;;
+        *)
+            command dwm "$@"
+            ;;
+    esac
+}}"#
+    )
 }
 
 /// Returns the fish shell function definition that wraps the `dwm` binary.
-fn fish_function() -> &'static str {
-    r#"function dwm
-    set -l output (command dwm $argv)
-    set -l exit_code $status
-    if test $exit_code -eq 0 -a -n "$output" -a -d "$output"
-        cd "$output"; or return 1
-    else if test -n "$output"
-        echo "$output"
+fn fish_function() -> String {
+    let cases = CD_SUBCOMMANDS.join(" ");
+    format!(
+        r#"function dwm
+    switch "$argv[1]"
+        case {cases} ""
+            set -l dir (command dwm $argv)
+            or return $status
+            if test -n "$dir"
+                cd "$dir"; or return 1
+            end
+        case '*'
+            command dwm $argv
     end
-    return $exit_code
 end"#
+    )
 }
 
 /// Detect the parent shell from environment variables.
@@ -206,7 +220,7 @@ pub fn print_shell_setup(shell: Option<Shell>) -> Result<()> {
 mod tests {
     use super::*;
 
-    // --- POSIX (bash/zsh) tests ---
+    // --- POSIX (bash/zsh) wrapper structure tests ---
 
     #[test]
     fn posix_function_defines_dwm() {
@@ -227,36 +241,30 @@ mod tests {
     }
 
     #[test]
-    fn posix_function_cds_on_directory_output() {
+    fn posix_function_includes_all_cd_subcommands() {
         let fn_str = posix_function();
-        assert!(
-            fn_str.contains("-d \"$output\""),
-            "must test whether output is a directory"
-        );
-        assert!(
-            fn_str.contains("cd \"$output\""),
-            "must cd into directory output"
-        );
+        for sub in CD_SUBCOMMANDS {
+            assert!(
+                fn_str.contains(sub),
+                "posix wrapper must include cd subcommand '{sub}'"
+            );
+        }
     }
 
     #[test]
-    fn posix_function_echoes_non_directory_output() {
+    fn posix_function_passes_other_subcommands_through() {
+        let fn_str = posix_function();
         assert!(
-            posix_function().contains("echo \"$output\""),
-            "non-directory output must be printed through to the user"
+            fn_str.contains("*)\n            command dwm \"$@\""),
+            "non-cd subcommands must pass through directly"
         );
     }
 
     #[test]
     fn posix_function_propagates_exit_code() {
-        let fn_str = posix_function();
         assert!(
-            fn_str.contains("local exit_code=$?"),
-            "must capture the exit code"
-        );
-        assert!(
-            fn_str.contains("return $exit_code"),
-            "must propagate the exit code from the real binary"
+            posix_function().contains("|| return $?"),
+            "must propagate exit code on failure"
         );
     }
 
@@ -266,12 +274,10 @@ mod tests {
         let open = fn_str.matches('{').count();
         let close = fn_str.matches('}').count();
         assert_eq!(open, close, "braces must be balanced");
-
-        assert!(fn_str.contains("local output"));
-        assert!(fn_str.contains("local exit_code"));
+        assert!(fn_str.contains("local dir"));
     }
 
-    // --- Fish tests ---
+    // --- Fish wrapper structure tests ---
 
     #[test]
     fn fish_function_defines_dwm() {
@@ -292,50 +298,146 @@ mod tests {
     }
 
     #[test]
-    fn fish_function_cds_on_directory_output() {
+    fn fish_function_includes_all_cd_subcommands() {
         let fn_str = fish_function();
-        assert!(
-            fn_str.contains("-d \"$output\""),
-            "must test whether output is a directory"
-        );
-        assert!(
-            fn_str.contains("cd \"$output\""),
-            "must cd into directory output"
-        );
+        for sub in CD_SUBCOMMANDS {
+            assert!(
+                fn_str.contains(sub),
+                "fish wrapper must include cd subcommand '{sub}'"
+            );
+        }
     }
 
     #[test]
-    fn fish_function_echoes_non_directory_output() {
+    fn fish_function_passes_other_subcommands_through() {
+        let fn_str = fish_function();
+        assert!(fn_str.contains("case '*'"), "must have a catch-all case");
         assert!(
-            fish_function().contains("echo \"$output\""),
-            "non-directory output must be printed through to the user"
+            fn_str.contains("command dwm $argv"),
+            "non-cd subcommands must pass through directly"
         );
     }
 
     #[test]
     fn fish_function_propagates_exit_code() {
-        let fn_str = fish_function();
         assert!(
-            fn_str.contains("set -l exit_code $status"),
-            "must capture the exit code"
-        );
-        assert!(
-            fn_str.contains("return $exit_code"),
-            "must propagate the exit code from the real binary"
+            fish_function().contains("or return $status"),
+            "must propagate exit code on failure"
         );
     }
 
     #[test]
     fn fish_function_uses_set_for_variables() {
-        let fn_str = fish_function();
         assert!(
-            fn_str.contains("set -l output"),
+            fish_function().contains("set -l dir"),
             "must use set -l for local variables"
         );
-        assert!(
-            fn_str.contains("set -l exit_code"),
-            "must use set -l for local variables"
+    }
+
+    // --- POSIX wrapper integration tests (require bash) ---
+
+    fn bash_available() -> bool {
+        std::process::Command::new("bash")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Eval the POSIX wrapper in bash with a fake `dwm` binary that prints
+    /// `target_dir` to stdout. Runs `dwm <args>` then `pwd`, returning the
+    /// final working directory.
+    fn run_posix_wrapper(args: &str, target_dir: &std::path::Path) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a fake dwm binary that prints the target directory.
+        let fake_bin = tmp.path().join("dwm");
+        std::fs::write(
+            &fake_bin,
+            format!("#!/bin/sh\necho '{}'", target_dir.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let wrapper = posix_function();
+        let script = format!(
+            "export PATH=\"{bin_dir}:$PATH\"\n{wrapper}\ndwm {args}\npwd",
+            bin_dir = tmp.path().display(),
         );
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "bash wrapper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The last line of stdout is `pwd` output (the current directory).
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().last().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn posix_wrapper_cds_for_each_cd_subcommand() {
+        if !bash_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("workspace");
+        std::fs::create_dir(&target).unwrap();
+
+        for sub in CD_SUBCOMMANDS {
+            let pwd = run_posix_wrapper(&format!("{sub} some-arg"), &target);
+            assert_eq!(
+                pwd,
+                target.to_str().unwrap(),
+                "wrapper must cd after `dwm {sub}`"
+            );
+        }
+    }
+
+    #[test]
+    fn posix_wrapper_cds_on_bare_invocation() {
+        if !bash_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("workspace");
+        std::fs::create_dir(&target).unwrap();
+
+        let pwd = run_posix_wrapper("", &target);
+        assert_eq!(
+            pwd,
+            target.to_str().unwrap(),
+            "wrapper must cd on bare (no subcommand) invocation"
+        );
+    }
+
+    #[test]
+    fn posix_wrapper_does_not_cd_for_other_subcommands() {
+        if !bash_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("workspace");
+        std::fs::create_dir(&target).unwrap();
+
+        for sub in ["version", "status", "shell-setup"] {
+            let pwd = run_posix_wrapper(sub, &target);
+            assert_ne!(
+                pwd,
+                target.to_str().unwrap(),
+                "wrapper must NOT cd after `dwm {sub}`"
+            );
+        }
     }
 
     // --- Shell enum method tests ---
