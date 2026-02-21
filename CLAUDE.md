@@ -34,7 +34,7 @@ Every bug fix should include a regression test. New parsing functions and utilit
 - **`workspace.rs`** — Business logic: workspace creation/deletion/listing/renaming/switching. Manages `~/.dwm/` directory layout. `WorkspaceEntry` is the main data struct passed to the TUI.
 - **`tui.rs`** — Ratatui-based interactive table picker. Renders `WorkspaceEntry` data in a 6-column table (Name, Change, Description, Bookmarks, Modified, Changes).
 - **`names.rs`** — Random `adjective-noun` name generator for unnamed workspaces.
-- **`shell.rs`** — Emits a shell wrapper function; when `dwm` prints a directory path to stdout, the wrapper `cd`s into it.
+- **`shell.rs`** — Emits a shell wrapper function; subcommands that may produce a workspace path (`new`, `list`, `switch`, `delete`, `rename`) capture stdout and `cd` into the result, while all other subcommands run the binary directly.
 
 ### Key patterns
 
