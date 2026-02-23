@@ -125,7 +125,11 @@ fn new_workspace_inner(
 
 /// Deletes a workspace. Returns `true` if the cwd was inside the deleted
 /// workspace and a redirect path was printed to stdout.
-pub fn delete_workspace(name: Option<String>) -> Result<bool> {
+/// Delete a workspace by name (or infer from cwd).
+///
+/// When `quiet` is true, progress messages to stderr are suppressed — used by
+/// the TUI which owns the alternate screen on stderr.
+pub fn delete_workspace(name: Option<String>, quiet: bool) -> Result<bool> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
 
@@ -152,41 +156,7 @@ pub fn delete_workspace(name: Option<String>) -> Result<bool> {
         cwd,
         dwm_base,
     };
-    if let Some(redirect) = delete_workspace_inner(&deps, name, false)? {
-        println!("{}", redirect.display());
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-/// Like [`delete_workspace`] but suppresses progress messages to stderr.
-/// Used by the TUI which owns the alternate screen on stderr.
-pub fn delete_workspace_quiet(name: Option<String>) -> Result<bool> {
-    let cwd = std::env::current_dir()?;
-    let dwm_base = dwm_base_dir()?;
-
-    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
-        let relative = cwd.strip_prefix(&dwm_base)?;
-        let repo_name_str = relative
-            .components()
-            .next()
-            .context("could not determine repo from workspace path")?
-            .as_os_str()
-            .to_string_lossy()
-            .to_string();
-        let rd = repo_dir(&dwm_base, &repo_name_str);
-        vcs::detect_from_dwm_dir(&rd)?
-    } else {
-        vcs::detect(&cwd)?
-    };
-
-    let deps = WorkspaceDeps {
-        backend,
-        cwd,
-        dwm_base,
-    };
-    if let Some(redirect) = delete_workspace_inner(&deps, name, true)? {
+    if let Some(redirect) = delete_workspace_inner(&deps, name, quiet)? {
         println!("{}", redirect.display());
         Ok(true)
     } else {

@@ -33,7 +33,7 @@ fn main() -> Result<()> {
             let entries = workspace::list_workspace_entries()?;
             match tui::run_picker(
                 entries,
-                |name| workspace::delete_workspace_quiet(Some(name.to_string())),
+                |name| workspace::delete_workspace(Some(name.to_string()), true),
                 workspace::list_workspace_entries,
             )? {
                 Some(tui::PickerResult::Selected(path)) => println!("{}", path),
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         }
         Commands::Switch { name } => workspace::switch_workspace(&name),
         Commands::Rename { name, new_name } => workspace::rename_workspace(name, new_name),
-        Commands::Delete { name } => workspace::delete_workspace(name).map(|_| ()),
+        Commands::Delete { name } => workspace::delete_workspace(name, false).map(|_| ()),
         Commands::Version => {
             println!("dwm {}", env!("CARGO_PKG_VERSION"));
             Ok(())
