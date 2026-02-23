@@ -781,4 +781,192 @@ mod tests {
         let pre_tool = hooks_obj["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool.len(), 1);
     }
+
+    // --- Gap: CLI parse tests for new subcommands ---
+
+    #[test]
+    fn cli_hook_handler_parses() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["dwm", "hook-handler"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::HookHandler)));
+    }
+
+    #[test]
+    fn cli_agent_setup_parses() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["dwm", "agent-setup"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::AgentSetup)));
+    }
+
+    // --- Gap: resolve_workspace_from_cwd with jj VcsType ---
+
+    #[test]
+    fn resolve_cwd_main_repo_jj() {
+        let dir = TempDir::new().unwrap();
+        let dwm_base = dir.path().join(".dwm");
+        let repo_dir = dwm_base.join("myrepo-abc123");
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        let main_repo = dir.path().join("repos").join("myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        fs::write(
+            repo_dir.join(".main-repo"),
+            main_repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        fs::write(repo_dir.join(".vcs-type"), "jj").unwrap();
+
+        let cwd = main_repo.join("src");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
+        let (resolved_repo, ws_name) = result.unwrap();
+        assert_eq!(resolved_repo, repo_dir);
+        assert_eq!(ws_name, "default");
+    }
+
+    #[test]
+    fn resolve_cwd_main_repo_no_vcs_type_defaults_to_jj() {
+        let dir = TempDir::new().unwrap();
+        let dwm_base = dir.path().join(".dwm");
+        let repo_dir = dwm_base.join("myrepo-abc123");
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        let main_repo = dir.path().join("repos").join("myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        fs::write(
+            repo_dir.join(".main-repo"),
+            main_repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        // No .vcs-type file — should default to jj ("default")
+
+        let result = resolve_workspace_from_cwd(&dwm_base, &main_repo);
+        let (_resolved_repo, ws_name) = result.unwrap();
+        assert_eq!(ws_name, "default");
+    }
+
+    // --- Gap: stale boundary condition (exactly at threshold) ---
+
+    #[test]
+    fn stale_boundary_exactly_at_threshold_is_not_stale() {
+        let dir = TempDir::new().unwrap();
+        let now = 1_000_000u64;
+        let at_boundary = now - STALE_SECS; // exactly STALE_SECS ago
+        write_status_file(dir.path(), "sess", "ws", "working", at_boundary);
+
+        let map = read_agent_summaries_inner(dir.path(), now);
+        // updated_at is exactly STALE_SECS ago; check is `>` not `>=`, so NOT stale
+        let summary = map.get("ws").unwrap();
+        assert_eq!(summary.working, 1);
+    }
+
+    // --- Gap: remove_agent_status when file doesn't exist ---
+
+    #[test]
+    fn remove_nonexistent_status_is_ok() {
+        let dir = TempDir::new().unwrap();
+        // No status file exists; should not error
+        let result = remove_agent_status(dir.path(), "nonexistent-session");
+        assert!(result.is_ok());
+    }
+
+    // --- Gap: handle_hook silently ignores missing session_id/cwd ---
+
+    #[test]
+    fn resolve_cwd_dwm_base_only_returns_none() {
+        // cwd is exactly the dwm_base with only one path component (repo name, no workspace)
+        let dwm_base = PathBuf::from("/home/user/.dwm");
+        let cwd = PathBuf::from("/home/user/.dwm/myrepo-abc123");
+
+        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
+        assert!(
+            result.is_none(),
+            "should need both repo and workspace components"
+        );
+    }
+
+    // --- Gap: AgentStatus serde roundtrip ---
+
+    #[test]
+    fn agent_status_serde_roundtrip() {
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Idle,
+            AgentStatus::Waiting,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: AgentStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn agent_status_file_serde_roundtrip() {
+        let file = AgentStatusFile {
+            workspace: "my-ws".to_string(),
+            status: AgentStatus::Waiting,
+            updated_at: 1234567890,
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: AgentStatusFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workspace, "my-ws");
+        assert_eq!(back.status, AgentStatus::Waiting);
+        assert_eq!(back.updated_at, 1234567890);
+    }
+
+    // --- Gap: all stale entries → workspace not in map ---
+
+    #[test]
+    fn all_stale_entries_result_in_empty_map() {
+        let dir = TempDir::new().unwrap();
+        let now = 1_000_000u64;
+        let old = now - STALE_SECS - 100;
+        write_status_file(dir.path(), "s1", "ws", "working", old);
+        write_status_file(dir.path(), "s2", "ws", "waiting", old);
+
+        let map = read_agent_summaries_inner(dir.path(), now);
+        assert!(map.is_empty());
+    }
+
+    // --- Gap: write_agent_status overwrites existing session file ---
+
+    #[test]
+    fn write_overwrites_previous_status_for_same_session() {
+        let dir = TempDir::new().unwrap();
+        write_agent_status(dir.path(), "sess-1", "ws", AgentStatus::Working).unwrap();
+        write_agent_status(dir.path(), "sess-1", "ws", AgentStatus::Waiting).unwrap();
+
+        let map = read_agent_summaries(dir.path());
+        let summary = map.get("ws").unwrap();
+        // Should have 1 waiting, NOT 1 working + 1 waiting
+        assert_eq!(summary.waiting, 1);
+        assert_eq!(summary.working, 0);
+    }
+
+    // --- Gap: dwm_hook_config produces expected event keys ---
+
+    #[test]
+    fn hook_config_has_expected_events() {
+        let config = dwm_hook_config();
+        let obj = config.as_object().unwrap();
+        assert!(obj.contains_key("PreToolUse"));
+        assert!(obj.contains_key("Stop"));
+        assert!(obj.contains_key("Notification"));
+        assert!(obj.contains_key("UserPromptSubmit"));
+        assert!(obj.contains_key("SessionEnd"));
+        assert_eq!(obj.len(), 5);
+    }
+
+    #[test]
+    fn hook_config_notification_has_matcher() {
+        let config = dwm_hook_config();
+        let notif = config["Notification"].as_array().unwrap();
+        assert_eq!(notif.len(), 1);
+        let matcher = notif[0]["matcher"].as_str().unwrap();
+        assert!(matcher.contains("idle_prompt"));
+        assert!(matcher.contains("permission_prompt"));
+    }
 }
