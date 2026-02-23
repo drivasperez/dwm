@@ -6,6 +6,22 @@ use std::time::SystemTime;
 
 use crate::{names, vcs};
 
+/// Whether a workspace's changes have been merged into trunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeStatus {
+    Merged,
+    Unmerged,
+}
+
+/// Controls whether progress messages are printed to stderr during deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutput {
+    /// Print progress messages to stderr.
+    Verbose,
+    /// Suppress progress messages (used by the TUI which owns the alternate screen).
+    Quiet,
+}
+
 /// Return `true` if `cwd` is equal to or a subdirectory of `ws_path`.
 fn is_inside(cwd: &std::path::Path, ws_path: &std::path::Path) -> bool {
     cwd.starts_with(ws_path)
@@ -125,7 +141,8 @@ fn new_workspace_inner(
 
 /// Deletes a workspace. Returns `true` if the cwd was inside the deleted
 /// workspace and a redirect path was printed to stdout.
-pub fn delete_workspace(name: Option<String>) -> Result<bool> {
+/// Delete a workspace by name (or infer from cwd).
+pub fn delete_workspace(name: Option<String>, output: DeleteOutput) -> Result<bool> {
     let cwd = std::env::current_dir()?;
     let dwm_base = dwm_base_dir()?;
 
@@ -152,41 +169,7 @@ pub fn delete_workspace(name: Option<String>) -> Result<bool> {
         cwd,
         dwm_base,
     };
-    if let Some(redirect) = delete_workspace_inner(&deps, name, false)? {
-        println!("{}", redirect.display());
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-/// Like [`delete_workspace`] but suppresses progress messages to stderr.
-/// Used by the TUI which owns the alternate screen on stderr.
-pub fn delete_workspace_quiet(name: Option<String>) -> Result<bool> {
-    let cwd = std::env::current_dir()?;
-    let dwm_base = dwm_base_dir()?;
-
-    let backend: Box<dyn vcs::VcsBackend> = if cwd.starts_with(&dwm_base) {
-        let relative = cwd.strip_prefix(&dwm_base)?;
-        let repo_name_str = relative
-            .components()
-            .next()
-            .context("could not determine repo from workspace path")?
-            .as_os_str()
-            .to_string_lossy()
-            .to_string();
-        let rd = repo_dir(&dwm_base, &repo_name_str);
-        vcs::detect_from_dwm_dir(&rd)?
-    } else {
-        vcs::detect(&cwd)?
-    };
-
-    let deps = WorkspaceDeps {
-        backend,
-        cwd,
-        dwm_base,
-    };
-    if let Some(redirect) = delete_workspace_inner(&deps, name, true)? {
+    if let Some(redirect) = delete_workspace_inner(&deps, name, output)? {
         println!("{}", redirect.display());
         Ok(true)
     } else {
@@ -195,13 +178,12 @@ pub fn delete_workspace_quiet(name: Option<String>) -> Result<bool> {
 }
 
 /// Returns the path the shell should cd to if cwd was inside the deleted workspace.
-/// When `quiet` is true, progress messages to stderr are suppressed (used by
-/// the TUI which owns the alternate screen on stderr).
 fn delete_workspace_inner(
     deps: &WorkspaceDeps,
     name: Option<String>,
-    quiet: bool,
+    output: DeleteOutput,
 ) -> Result<Option<PathBuf>> {
+    let verbose = output == DeleteOutput::Verbose;
     let (repo_name_str, ws_name) = match name {
         Some(name) => {
             let repo_name_str = if deps.cwd.starts_with(&deps.dwm_base) {
@@ -245,19 +227,19 @@ fn delete_workspace_inner(
 
     let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
-    if !quiet {
+    if verbose {
         eprintln!("forgetting workspace '{}'...", ws_name);
     }
     deps.backend
         .workspace_remove(&main_repo, &ws_name, &ws_path)?;
 
     if ws_path.exists() {
-        if !quiet {
+        if verbose {
             eprintln!("removing {}...", ws_path.display());
         }
         fs::remove_dir_all(&ws_path)?;
     }
-    if !quiet {
+    if verbose {
         eprintln!("workspace '{}' deleted", ws_name);
     }
 
@@ -573,14 +555,15 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
 
         let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
 
-        let is_merged = if has_info {
-            deps.backend.is_merged_into_trunk(&main_repo, &path, &name)
-        } else {
-            false
-        };
+        let merge_status =
+            if has_info && deps.backend.is_merged_into_trunk(&main_repo, &path, &name) {
+                MergeStatus::Merged
+            } else {
+                MergeStatus::Unmerged
+            };
 
         entries.push(WorkspaceEntry {
-            is_stale: compute_is_stale(false, is_merged, modified),
+            is_stale: compute_is_stale(merge_status, modified),
             repo_name: None,
             name,
             path,
@@ -618,16 +601,12 @@ pub struct WorkspaceEntry {
     pub vcs_type: vcs::VcsType,
 }
 
-/// Determine whether a workspace should be shown as stale.
+/// Determine whether a non-main workspace should be shown as stale.
 ///
 /// A workspace is stale if it has been merged into trunk, or if its last
-/// modification time is more than [`STALE_DAYS`] days in the past. The main
-/// workspace is never considered stale.
-fn compute_is_stale(is_main: bool, is_merged: bool, last_modified: Option<SystemTime>) -> bool {
-    if is_main {
-        return false;
-    }
-    if is_merged {
+/// modification time is more than [`STALE_DAYS`] days in the past.
+fn compute_is_stale(merged: MergeStatus, last_modified: Option<SystemTime>) -> bool {
+    if merged == MergeStatus::Merged {
         return true;
     }
     if let Some(time) = last_modified
@@ -1271,7 +1250,9 @@ mod tests {
             dwm_base: dwm_base.clone(),
         };
 
-        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string()), false).unwrap();
+        let redirect =
+            delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose)
+                .unwrap();
         assert!(
             redirect.is_none(),
             "should not redirect when cwd is outside workspace"
@@ -1315,7 +1296,9 @@ mod tests {
             dwm_base,
         };
 
-        let redirect = delete_workspace_inner(&deps, Some("my-ws".to_string()), false).unwrap();
+        let redirect =
+            delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose)
+                .unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
         assert_eq!(redirect, main_repo);
     }
@@ -1339,7 +1322,7 @@ mod tests {
         };
 
         // No name given — should infer repo=myrepo, ws=inferred-ws from cwd
-        let _redirected = delete_workspace_inner(&deps, None, false).unwrap();
+        let _redirected = delete_workspace_inner(&deps, None, DeleteOutput::Verbose).unwrap();
 
         let calls = calls.lock().unwrap();
         match &calls[0] {
@@ -1365,8 +1348,12 @@ mod tests {
             dwm_base,
         };
 
-        let err =
-            delete_workspace_inner(&deps, Some("nonexistent".to_string()), false).unwrap_err();
+        let err = delete_workspace_inner(
+            &deps,
+            Some("nonexistent".to_string()),
+            DeleteOutput::Verbose,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
     }
 
@@ -1744,31 +1731,33 @@ mod tests {
     // ── compute_is_stale tests ────────────────────────────────────
 
     #[test]
-    fn stale_main_is_never_stale() {
-        assert!(!compute_is_stale(true, true, None));
-        assert!(!compute_is_stale(true, false, None));
+    fn stale_merged_workspace_is_stale() {
+        assert!(compute_is_stale(
+            MergeStatus::Merged,
+            Some(SystemTime::now())
+        ));
     }
 
     #[test]
-    fn stale_merged_workspace_is_stale() {
-        assert!(compute_is_stale(false, true, Some(SystemTime::now())));
+    fn stale_merged_workspace_without_time_is_stale() {
+        assert!(compute_is_stale(MergeStatus::Merged, None));
     }
 
     #[test]
     fn stale_old_workspace_is_stale() {
         let old_time = SystemTime::now() - std::time::Duration::from_secs(86400 * 31);
-        assert!(compute_is_stale(false, false, Some(old_time)));
+        assert!(compute_is_stale(MergeStatus::Unmerged, Some(old_time)));
     }
 
     #[test]
     fn stale_recent_workspace_is_not_stale() {
         let recent = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
-        assert!(!compute_is_stale(false, false, Some(recent)));
+        assert!(!compute_is_stale(MergeStatus::Unmerged, Some(recent)));
     }
 
     #[test]
     fn stale_unknown_time_not_merged_is_not_stale() {
-        assert!(!compute_is_stale(false, false, None));
+        assert!(!compute_is_stale(MergeStatus::Unmerged, None));
     }
 
     // ── format_time_ago tests ───────────────────────────────────────
@@ -2008,7 +1997,7 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps3, Some("test-ws".to_string()), false).unwrap();
+        delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose).unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"
@@ -2322,7 +2311,7 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps3, Some("test-ws".to_string()), false).unwrap();
+        delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose).unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"
@@ -2395,7 +2384,12 @@ mod tests {
             cwd: main_repo.clone(),
             dwm_base: dwm_base.clone(),
         };
-        delete_workspace_inner(&deps4, Some("my cool feature".to_string()), false).unwrap();
+        delete_workspace_inner(
+            &deps4,
+            Some("my cool feature".to_string()),
+            DeleteOutput::Verbose,
+        )
+        .unwrap();
         assert!(
             !ws_dir.exists(),
             "workspace dir should be removed after deletion"
