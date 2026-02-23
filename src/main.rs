@@ -77,7 +77,11 @@ fn main() -> Result<()> {
         }
         Commands::Version => {
             use owo_colors::OwoColorize;
-            println!("{} {}", "dwm".bold().cyan(), env!("CARGO_PKG_VERSION").bright_white());
+            println!(
+                "{} {}",
+                "dwm".bold().cyan(),
+                env!("CARGO_PKG_VERSION").bright_white()
+            );
             Ok(())
         }
         Commands::ShellSetup {

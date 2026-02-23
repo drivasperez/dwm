@@ -438,12 +438,20 @@ pub fn setup_agent_hooks() -> Result<()> {
 
     // Check if already installed
     if hooks_already_installed(&settings) {
-        eprintln!("  {} Already installed in {}", "✓".green(), display.dimmed());
+        eprintln!(
+            "  {} Already installed in {}",
+            "✓".green(),
+            display.dimmed()
+        );
         return Ok(());
     }
 
     // Prompt the user for permission
-    eprint!("  {} Add Claude Code hooks to {}? [y/N] ", "?".bold().cyan(), display.bold());
+    eprint!(
+        "  {} Add Claude Code hooks to {}? [y/N] ",
+        "?".bold().cyan(),
+        display.bold()
+    );
     let tty = std::fs::File::open("/dev/tty");
     let response = match tty {
         Ok(f) => {

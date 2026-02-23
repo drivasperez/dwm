@@ -239,7 +239,11 @@ fn delete_workspace_inner(
     let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
     if verbose {
-        eprintln!("{} workspace '{}'...", "forgetting".yellow(), ws_name.bold());
+        eprintln!(
+            "{} workspace '{}'...",
+            "forgetting".yellow(),
+            ws_name.bold()
+        );
     }
     deps.backend
         .workspace_remove(&main_repo, &ws_name, &ws_path)?;
@@ -906,7 +910,8 @@ fn print_status_to<W: Write>(entries: &[WorkspaceEntry], mut out: W) -> Result<(
         };
 
         let stat = &entry.diff_stat;
-        let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+        let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0
+        {
             "clean".to_string()
         } else {
             let mut parts = Vec::new();
@@ -2191,7 +2196,7 @@ mod tests {
         ];
 
         let out = print_status_to_string(&entries);
-        
+
         // Assert some key properties of the table
         assert!(out.contains("NAME"));
         assert!(out.contains("default (main)"));
@@ -2209,7 +2214,7 @@ mod tests {
         assert!(out.contains("+100 -50"));
 
         // Verify ANSI codes are present (cyan for names)
-        assert!(out.contains("\x1b[36m")); 
+        assert!(out.contains("\x1b[36m"));
     }
 
     // ── E2E tests with real git repos ───────────────────────────────

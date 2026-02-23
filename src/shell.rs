@@ -155,7 +155,11 @@ fn offer_install(shell: Shell) -> Result<bool> {
     if config.exists() {
         let contents = std::fs::read_to_string(&config)?;
         if contents.contains(setup_line) {
-            eprintln!("  {} Already installed in {}", "✓".green(), display.dimmed());
+            eprintln!(
+                "  {} Already installed in {}",
+                "✓".green(),
+                display.dimmed()
+            );
             return Ok(true);
         }
     }
