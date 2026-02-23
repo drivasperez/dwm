@@ -368,6 +368,57 @@ fn hooks_already_installed(settings: &serde_json::Value) -> bool {
     true
 }
 
+/// Merge dwm hook configuration into the given settings object.
+///
+/// This is a pure function that takes existing settings and returns a new
+/// settings object with dwm hooks added, preserving all other settings.
+fn merge_dwm_hooks(mut settings: serde_json::Value) -> Result<serde_json::Value> {
+    let dwm_hooks = dwm_hook_config();
+
+    // Ensure root is an object
+    let settings_obj = settings
+        .as_object_mut()
+        .context("settings.json root must be an object")?;
+
+    // Get or create "hooks" object
+    let hooks_obj = settings_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks must be an object")?;
+
+    for (event_name, dwm_groups) in dwm_hooks.as_object().unwrap() {
+        let arr = hooks_obj
+            .entry(event_name)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{} must be an array", event_name))?;
+
+        // Check if dwm hooks are already installed (look for "dwm hook-handler" command)
+        let already_installed = arr.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c == "dwm hook-handler")
+                    })
+                })
+                .unwrap_or(false)
+        });
+
+        if !already_installed {
+            for group in dwm_groups.as_array().unwrap() {
+                arr.push(group.clone());
+            }
+        }
+    }
+
+    Ok(settings)
+}
+
 /// Install dwm hook configuration into ~/.claude/settings.json.
 pub fn setup_agent_hooks() -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
@@ -407,45 +458,7 @@ pub fn setup_agent_hooks() -> Result<()> {
         return Ok(());
     }
 
-    let dwm_hooks = dwm_hook_config();
-
-    // Merge: for each event, append our hook groups to the existing array
-    let hooks = settings
-        .as_object_mut()
-        .context("settings.json root must be an object")?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_obj = hooks.as_object_mut().context("hooks must be an object")?;
-
-    for (event_name, dwm_groups) in dwm_hooks.as_object().unwrap() {
-        let existing = hooks_obj
-            .entry(event_name)
-            .or_insert_with(|| serde_json::json!([]));
-        let arr = existing
-            .as_array_mut()
-            .with_context(|| format!("hooks.{} must be an array", event_name))?;
-
-        // Check if dwm hooks are already installed (look for "dwm hook-handler" command)
-        let already_installed = arr.iter().any(|group| {
-            group
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .map(|hooks| {
-                    hooks.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|c| c == "dwm hook-handler")
-                    })
-                })
-                .unwrap_or(false)
-        });
-
-        if !already_installed {
-            for group in dwm_groups.as_array().unwrap() {
-                arr.push(group.clone());
-            }
-        }
-    }
+    settings = merge_dwm_hooks(settings)?;
 
     // Write back
     fs::create_dir_all(&claude_dir)?;
@@ -1078,5 +1091,72 @@ mod tests {
         let matcher = notif[0]["matcher"].as_str().unwrap();
         assert!(matcher.contains("idle_prompt"));
         assert!(matcher.contains("permission_prompt"));
+    }
+
+    #[test]
+    fn merge_dwm_hooks_creates_fresh_settings() {
+        let settings = serde_json::json!({});
+        let merged = merge_dwm_hooks(settings).unwrap();
+
+        let hooks = merged["hooks"].as_object().unwrap();
+        assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("Notification"));
+        assert!(hooks.contains_key("UserPromptSubmit"));
+        assert!(hooks.contains_key("SessionEnd"));
+
+        // Check one specifically
+        let pre_tool = hooks["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 1);
+        assert_eq!(pre_tool[0]["hooks"][0]["command"], "dwm hook-handler");
+    }
+
+    #[test]
+    fn merge_dwm_hooks_preserves_existing_hooks() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "my-other-tool" }] }
+                ]
+            },
+            "other_setting": "val"
+        });
+
+        let merged = merge_dwm_hooks(settings).unwrap();
+        let pre_tool = merged["hooks"]["PreToolUse"].as_array().unwrap();
+
+        assert_eq!(pre_tool.len(), 2);
+        assert_eq!(pre_tool[0]["hooks"][0]["command"], "my-other-tool");
+        assert_eq!(pre_tool[1]["hooks"][0]["command"], "dwm hook-handler");
+        assert_eq!(merged["other_setting"], "val");
+    }
+
+    #[test]
+    fn merge_dwm_hooks_does_not_duplicate() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ]
+            }
+        });
+
+        let merged = merge_dwm_hooks(settings).unwrap();
+        let pre_tool = merged["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // Should still be just 1
+        assert_eq!(pre_tool.len(), 1);
+    }
+
+    #[test]
+    fn merge_dwm_hooks_errors_on_invalid_structure() {
+        let settings = serde_json::json!([]); // Not an object
+        assert!(merge_dwm_hooks(settings).is_err());
+
+        let settings = serde_json::json!({ "hooks": [] }); // hooks should be an object
+        assert!(merge_dwm_hooks(settings).is_err());
+
+        let settings = serde_json::json!({ "hooks": { "PreToolUse": {} } }); // event should be an array
+        assert!(merge_dwm_hooks(settings).is_err());
     }
 }
