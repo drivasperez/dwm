@@ -6,6 +6,13 @@ use std::time::SystemTime;
 
 use crate::{names, vcs};
 
+/// Whether a workspace's changes have been merged into trunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeStatus {
+    Merged,
+    Unmerged,
+}
+
 /// Controls whether progress messages are printed to stderr during deletion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutput {
@@ -548,14 +555,15 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
 
         let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
 
-        let is_merged = if has_info {
-            deps.backend.is_merged_into_trunk(&main_repo, &path, &name)
-        } else {
-            false
-        };
+        let merge_status =
+            if has_info && deps.backend.is_merged_into_trunk(&main_repo, &path, &name) {
+                MergeStatus::Merged
+            } else {
+                MergeStatus::Unmerged
+            };
 
         entries.push(WorkspaceEntry {
-            is_stale: compute_is_stale(false, is_merged, modified),
+            is_stale: compute_is_stale(merge_status, modified),
             repo_name: None,
             name,
             path,
@@ -593,16 +601,12 @@ pub struct WorkspaceEntry {
     pub vcs_type: vcs::VcsType,
 }
 
-/// Determine whether a workspace should be shown as stale.
+/// Determine whether a non-main workspace should be shown as stale.
 ///
 /// A workspace is stale if it has been merged into trunk, or if its last
-/// modification time is more than [`STALE_DAYS`] days in the past. The main
-/// workspace is never considered stale.
-fn compute_is_stale(is_main: bool, is_merged: bool, last_modified: Option<SystemTime>) -> bool {
-    if is_main {
-        return false;
-    }
-    if is_merged {
+/// modification time is more than [`STALE_DAYS`] days in the past.
+fn compute_is_stale(merged: MergeStatus, last_modified: Option<SystemTime>) -> bool {
+    if merged == MergeStatus::Merged {
         return true;
     }
     if let Some(time) = last_modified
@@ -1727,31 +1731,33 @@ mod tests {
     // ── compute_is_stale tests ────────────────────────────────────
 
     #[test]
-    fn stale_main_is_never_stale() {
-        assert!(!compute_is_stale(true, true, None));
-        assert!(!compute_is_stale(true, false, None));
+    fn stale_merged_workspace_is_stale() {
+        assert!(compute_is_stale(
+            MergeStatus::Merged,
+            Some(SystemTime::now())
+        ));
     }
 
     #[test]
-    fn stale_merged_workspace_is_stale() {
-        assert!(compute_is_stale(false, true, Some(SystemTime::now())));
+    fn stale_merged_workspace_without_time_is_stale() {
+        assert!(compute_is_stale(MergeStatus::Merged, None));
     }
 
     #[test]
     fn stale_old_workspace_is_stale() {
         let old_time = SystemTime::now() - std::time::Duration::from_secs(86400 * 31);
-        assert!(compute_is_stale(false, false, Some(old_time)));
+        assert!(compute_is_stale(MergeStatus::Unmerged, Some(old_time)));
     }
 
     #[test]
     fn stale_recent_workspace_is_not_stale() {
         let recent = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
-        assert!(!compute_is_stale(false, false, Some(recent)));
+        assert!(!compute_is_stale(MergeStatus::Unmerged, Some(recent)));
     }
 
     #[test]
     fn stale_unknown_time_not_merged_is_not_stale() {
-        assert!(!compute_is_stale(false, false, None));
+        assert!(!compute_is_stale(MergeStatus::Unmerged, None));
     }
 
     // ── format_time_ago tests ───────────────────────────────────────
