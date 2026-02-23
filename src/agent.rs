@@ -5,12 +5,12 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::vcs;
 
-/// How long (in seconds) before a status file is considered stale and ignored.
-const STALE_SECS: u64 = 600; // 10 minutes
+/// How long before a status file is considered stale and ignored.
+const STALE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Possible states of a Claude Code agent session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +87,7 @@ fn now_secs() -> u64 {
 
 /// Read all agent status files for a repo and return per-workspace summaries.
 ///
-/// Stale entries (older than [`STALE_SECS`]) are silently ignored.
+/// Stale entries (older than [`STALE_TIMEOUT`]) are silently ignored.
 pub fn read_agent_summaries(repo_dir: &Path) -> HashMap<String, AgentSummary> {
     read_agent_summaries_inner(repo_dir, now_secs())
 }
@@ -116,7 +116,7 @@ fn read_agent_summaries_inner(repo_dir: &Path, now: u64) -> HashMap<String, Agen
         };
 
         // Skip stale entries
-        if now.saturating_sub(status_file.updated_at) > STALE_SECS {
+        if now.saturating_sub(status_file.updated_at) > STALE_TIMEOUT.as_secs() {
             continue;
         }
 
@@ -475,7 +475,7 @@ mod tests {
     fn stale_entries_ignored() {
         let dir = TempDir::new().unwrap();
         let now = now_secs();
-        let old = now - STALE_SECS - 1;
+        let old = now - STALE_TIMEOUT.as_secs() - 1;
         write_status_file(dir.path(), "old-session", "ws", "working", old);
         write_status_file(dir.path(), "new-session", "ws", "idle", now);
 
@@ -854,11 +854,11 @@ mod tests {
     fn stale_boundary_exactly_at_threshold_is_not_stale() {
         let dir = TempDir::new().unwrap();
         let now = 1_000_000u64;
-        let at_boundary = now - STALE_SECS; // exactly STALE_SECS ago
+        let at_boundary = now - STALE_TIMEOUT.as_secs();
         write_status_file(dir.path(), "sess", "ws", "working", at_boundary);
 
         let map = read_agent_summaries_inner(dir.path(), now);
-        // updated_at is exactly STALE_SECS ago; check is `>` not `>=`, so NOT stale
+        // updated_at is exactly at the threshold; check is `>` not `>=`, so NOT stale
         let summary = map.get("ws").unwrap();
         assert_eq!(summary.working, 1);
     }
@@ -923,7 +923,7 @@ mod tests {
     fn all_stale_entries_result_in_empty_map() {
         let dir = TempDir::new().unwrap();
         let now = 1_000_000u64;
-        let old = now - STALE_SECS - 100;
+        let old = now - STALE_TIMEOUT.as_secs() - 100;
         write_status_file(dir.path(), "s1", "ws", "working", old);
         write_status_file(dir.path(), "s2", "ws", "waiting", old);
 
