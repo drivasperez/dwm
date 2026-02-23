@@ -77,22 +77,19 @@ fn agent_status_dir(repo_dir: &Path) -> PathBuf {
     repo_dir.join(".agent-status")
 }
 
-/// Current unix timestamp in seconds.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// Convert a unix timestamp to a [`SystemTime`].
+fn system_time_from_epoch_secs(secs: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs)
 }
 
 /// Read all agent status files for a repo and return per-workspace summaries.
 ///
 /// Stale entries (older than [`STALE_TIMEOUT`]) are silently ignored.
 pub fn read_agent_summaries(repo_dir: &Path) -> HashMap<String, AgentSummary> {
-    read_agent_summaries_inner(repo_dir, now_secs())
+    read_agent_summaries_at(repo_dir, SystemTime::now())
 }
 
-fn read_agent_summaries_inner(repo_dir: &Path, now: u64) -> HashMap<String, AgentSummary> {
+fn read_agent_summaries_at(repo_dir: &Path, now: SystemTime) -> HashMap<String, AgentSummary> {
     let dir = agent_status_dir(repo_dir);
     let mut map: HashMap<String, AgentSummary> = HashMap::new();
 
@@ -116,7 +113,9 @@ fn read_agent_summaries_inner(repo_dir: &Path, now: u64) -> HashMap<String, Agen
         };
 
         // Skip stale entries
-        if now.saturating_sub(status_file.updated_at) > STALE_TIMEOUT.as_secs() {
+        let updated = system_time_from_epoch_secs(status_file.updated_at);
+        let age = now.duration_since(updated).unwrap_or(Duration::ZERO);
+        if age > STALE_TIMEOUT {
             continue;
         }
 
@@ -141,10 +140,14 @@ pub fn write_agent_status(
     let dir = agent_status_dir(repo_dir);
     fs::create_dir_all(&dir)?;
 
+    let updated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let file = AgentStatusFile {
         workspace: workspace.to_string(),
         status,
-        updated_at: now_secs(),
+        updated_at,
     };
     let json = serde_json::to_string(&file)?;
 
@@ -407,6 +410,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Convert a u64 epoch timestamp to SystemTime for test assertions.
+    fn epoch(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
     fn write_status_file(
         dir: &Path,
         session_id: &str,
@@ -433,10 +441,10 @@ mod tests {
     #[test]
     fn read_single_status() {
         let dir = TempDir::new().unwrap();
-        let now = now_secs();
+        let now = 1_000_000u64;
         write_status_file(dir.path(), "session1", "my-ws", "working", now);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         let summary = map.get("my-ws").unwrap();
         assert_eq!(summary.working, 1);
         assert_eq!(summary.waiting, 0);
@@ -446,13 +454,13 @@ mod tests {
     #[test]
     fn read_multiple_agents_same_workspace() {
         let dir = TempDir::new().unwrap();
-        let now = now_secs();
+        let now = 1_000_000u64;
         write_status_file(dir.path(), "s1", "ws", "working", now);
         write_status_file(dir.path(), "s2", "ws", "waiting", now);
         write_status_file(dir.path(), "s3", "ws", "waiting", now);
         write_status_file(dir.path(), "s4", "ws", "idle", now);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         let summary = map.get("ws").unwrap();
         assert_eq!(summary.working, 1);
         assert_eq!(summary.waiting, 2);
@@ -462,11 +470,11 @@ mod tests {
     #[test]
     fn read_multiple_workspaces() {
         let dir = TempDir::new().unwrap();
-        let now = now_secs();
+        let now = 1_000_000u64;
         write_status_file(dir.path(), "s1", "ws-a", "working", now);
         write_status_file(dir.path(), "s2", "ws-b", "idle", now);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         assert_eq!(map.get("ws-a").unwrap().working, 1);
         assert_eq!(map.get("ws-b").unwrap().idle, 1);
     }
@@ -474,12 +482,12 @@ mod tests {
     #[test]
     fn stale_entries_ignored() {
         let dir = TempDir::new().unwrap();
-        let now = now_secs();
+        let now = 1_000_000u64;
         let old = now - STALE_TIMEOUT.as_secs() - 1;
         write_status_file(dir.path(), "old-session", "ws", "working", old);
         write_status_file(dir.path(), "new-session", "ws", "idle", now);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         let summary = map.get("ws").unwrap();
         assert_eq!(summary.working, 0);
         assert_eq!(summary.idle, 1);
@@ -857,7 +865,7 @@ mod tests {
         let at_boundary = now - STALE_TIMEOUT.as_secs();
         write_status_file(dir.path(), "sess", "ws", "working", at_boundary);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         // updated_at is exactly at the threshold; check is `>` not `>=`, so NOT stale
         let summary = map.get("ws").unwrap();
         assert_eq!(summary.working, 1);
@@ -927,7 +935,7 @@ mod tests {
         write_status_file(dir.path(), "s1", "ws", "working", old);
         write_status_file(dir.path(), "s2", "ws", "waiting", old);
 
-        let map = read_agent_summaries_inner(dir.path(), now);
+        let map = read_agent_summaries_at(dir.path(), epoch(now));
         assert!(map.is_empty());
     }
 
