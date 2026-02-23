@@ -22,13 +22,10 @@ Pre-built binaries and a shell installer are available on the [latest GitHub rel
 
 ## Shell setup
 
-Run `dwm shell-setup` interactively and it will offer to add the wrapper to your shell config automatically:
+Run `dwm setup` interactively and it will offer to add the wrapper to your shell config and set up agent hooks automatically:
 
 ```sh
-dwm shell-setup        # auto-detects your shell and offers to install
-dwm shell-setup --fish # explicitly use fish
-dwm shell-setup --zsh  # explicitly use zsh
-dwm shell-setup --bash # explicitly use bash
+dwm setup
 ```
 
 Or add it manually:
@@ -59,7 +56,7 @@ dwm status              # non-interactive workspace summary
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
-dwm agent-setup         # set up Claude Code agent status tracking
+dwm setup               # interactive shell and agent setup
 dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
@@ -71,7 +68,7 @@ dwm can show the status of [Claude Code](https://docs.anthropic.com/en/docs/clau
 To set it up, run:
 
 ```sh
-dwm agent-setup
+dwm setup
 ```
 
 This installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) into `~/.claude/settings.json` that report agent status to dwm via the `dwm hook-handler` command.

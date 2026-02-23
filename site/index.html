@@ -243,7 +243,8 @@
       </p>
       <p>
         It provides an interactive TUI picker for browsing and switching between workspaces, with
-        filtering, sorting, and inline deletion.
+        filtering, sorting, and inline deletion. It will also show a live-updating summary of Claude
+        Code sessions that are running in each workspace.
       </p>
       <p>
         My workflow looks like this: <code>dwm new</code> to create and move to the new worktree,
@@ -284,10 +285,10 @@
       <h2>SHELL SETUP</h2>
       <p>
         `dwm` needs to add a small snippet to your shell config in order to be able to switch
-        directories for you. Run <code>dwm shell-setup</code> interactively and it will offer
-        to add the wrapper to your shell config automatically:
+        directories for you. Run <code>dwm setup</code> interactively and it will offer
+        to add the wrapper to your shell config and set up agent hooks automatically:
       </p>
-      <pre data-copyable="true"><code>dwm shell-setup</code></pre>
+      <pre data-copyable="true"><code>dwm setup</code></pre>
       <p>Or add it manually:</p>
       <p><strong>Bash / Zsh</strong> — add to <code>.bashrc</code> or <code>.zshrc</code>:</p>
       <pre data-copyable="true"><code>eval "$(dwm shell-setup)"</code></pre>
@@ -296,6 +297,18 @@
       <p>
         This wraps the <code>dwm</code> binary so that selecting a workspace automatically
         <code>cd</code>s into it.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>AGENT STATUS TRACKING</h2>
+      <p>
+        dwm can show the status of <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> agents running in your workspaces. The TUI's "Agent" column displays per-workspace counts like <code>2 waiting, 1 working</code>.
+      </p>
+      <p>To set it up, run:</p>
+      <pre data-copyable="true"><code>dwm setup</code></pre>
+      <p>
+        This installs Claude Code hooks that report agent status to dwm.
       </p>
     </div>
 
@@ -329,11 +342,11 @@
         <dt>dwm delete [name]</dt>
         <dd>Delete a workspace (current one if name omitted)</dd>
 
+        <dt>dwm setup</dt>
+        <dd>Interactive shell and agent setup</dd>
+
         <dt>dwm version</dt>
         <dd>Print the current version (also available as <code>dwm --version</code>)</dd>
-
-        <dt>dwm agent-setup</dt>
-        <dd>Install Claude Code hooks for agent status tracking. The TUI will show which workspaces have agents working, idle, or waiting for feedback.</dd>
       </dl>
     </div>
 
