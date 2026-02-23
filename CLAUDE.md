@@ -27,7 +27,7 @@ Every bug fix should include a regression test. New parsing functions and utilit
 
 ### Module responsibilities
 
-- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `shell-setup`.
+- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `setup`.
 - **`vcs.rs`** — VCS abstraction layer. Defines `VcsBackend` trait, `VcsType` enum, and owns `WorkspaceInfo` and `DiffStat` structs shared across backends.
 - **`jj.rs`** — jj backend implementing `VcsBackend`. Runs `jj` as a subprocess via `Command`. Parsing functions for jj output are pure and unit-tested.
 - **`git.rs`** — Git backend implementing `VcsBackend`. Runs `git` as a subprocess via `Command`.
