@@ -31,9 +31,11 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            let repo_dir = workspace::current_repo_dir()?;
             let entries = workspace::list_workspace_entries()?;
             match tui::run_picker(
                 entries,
+                repo_dir,
                 |name| {
                     workspace::delete_workspace(
                         Some(name.to_string()),

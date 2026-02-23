@@ -443,6 +443,28 @@ fn rename_workspace_inner(
     }
 }
 
+/// Return the `~/.dwm/<repo>/` directory for the current working directory.
+pub fn current_repo_dir() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let dwm_base = dwm_base_dir()?;
+
+    let repo_name_str = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        relative
+            .components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        let backend = vcs::detect(&cwd)?;
+        backend.repo_name_from(&cwd)?
+    };
+
+    Ok(repo_dir(&dwm_base, &repo_name_str))
+}
+
 /// Collect [`WorkspaceEntry`] values for all workspaces belonging to the
 /// repository that contains the current directory.
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {

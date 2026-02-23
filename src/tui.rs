@@ -4,11 +4,53 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Frame, prelude::*, widgets::*};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::agent::AgentSummary;
 use crate::workspace::{WorkspaceEntry, format_time_ago};
+
+/// Spawn a background thread that periodically calls `produce` and posts
+/// results to `sender`. The thread sleeps for `interval` between calls and
+/// checks `stop` before each iteration.
+fn spawn_refresh_thread<T: Send + 'static>(
+    interval: std::time::Duration,
+    stop: Arc<AtomicBool>,
+    sender: Arc<Mutex<Option<T>>>,
+    mut produce: impl FnMut() -> Option<T> + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(interval);
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Some(value) = produce() {
+                let _ = sender.lock().map(|mut m| *m = Some(value));
+            }
+        }
+    })
+}
+
+/// Thread-safe single-slot mailbox for passing data from background threads.
+struct Mailbox<T>(Arc<Mutex<Option<T>>>);
+
+impl<T> Mailbox<T> {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    fn sender(&self) -> Arc<Mutex<Option<T>>> {
+        Arc::clone(&self.0)
+    }
+
+    fn take(&self) -> Option<T> {
+        self.0.try_lock().ok().and_then(|mut guard| guard.take())
+    }
+}
 
 #[derive(Debug, Clone)]
 enum PreviewState {
@@ -144,6 +186,10 @@ struct App {
     table_state: TableState,
     /// Transient status message shown in the help bar (e.g. after deletion).
     status_message: Option<String>,
+    /// Receives full workspace entry refreshes from background thread.
+    refresh_mailbox: Mailbox<Vec<WorkspaceEntry>>,
+    /// Receives agent status updates from background thread.
+    agent_refresh_mailbox: Mailbox<HashMap<String, AgentSummary>>,
 }
 
 impl App {
@@ -166,6 +212,8 @@ impl App {
             preview_mailbox: Arc::new(Mutex::new(None)),
             table_state: TableState::default().with_selected(0),
             status_message: None,
+            refresh_mailbox: Mailbox::new(),
+            agent_refresh_mailbox: Mailbox::new(),
         }
     }
 
@@ -243,6 +291,52 @@ impl App {
         {
             self.preview = state;
         }
+    }
+
+    /// Drain refresh mailboxes, merging updated data into current state.
+    ///
+    /// Agent-only updates are lightweight (no re-sort). Full entry refreshes
+    /// preserve the current selection by matching on workspace name.
+    fn drain_refresh_mailbox(&mut self) {
+        // Check agent-only refresh (fast path, ~2s interval)
+        if let Some(summaries) = self.agent_refresh_mailbox.take() {
+            for entry in &mut self.entries {
+                entry.agent_status = summaries.get(&entry.name).cloned();
+            }
+        }
+
+        // Check full entry refresh (~10s interval)
+        if let Some(new_entries) = self.refresh_mailbox.take() {
+            self.merge_entries(new_entries);
+        }
+    }
+
+    /// Merge a fresh set of entries, preserving current selection and sort/filter.
+    fn merge_entries(&mut self, new_entries: Vec<WorkspaceEntry>) {
+        // Remember currently-selected workspace name
+        let selected_name = self
+            .selected_entry_index()
+            .map(|idx| self.entries[idx].name.clone());
+
+        self.entries = new_entries;
+        sort_entries(&mut self.entries, self.sort_mode);
+        self.recompute_filter();
+
+        // Restore selection by name
+        if let Some(ref name) = selected_name {
+            let new_selected = self
+                .filtered_indices
+                .iter()
+                .position(|&i| self.entries[i].name == *name)
+                .unwrap_or(0);
+            self.selected = new_selected;
+        } else {
+            self.selected = 0;
+        }
+        if self.selected >= self.total_rows() {
+            self.selected = self.total_rows().saturating_sub(1);
+        }
+        self.sync_table_state();
     }
 
     /// Recompute `filtered_indices` after `filter_buf` has changed.
@@ -548,16 +642,17 @@ fn render(frame: &mut Frame, app: &mut App) {
 /// refresh the entry list.
 fn run_picker_inner<B: Backend>(
     terminal: &mut Terminal<B>,
-    entries: Vec<WorkspaceEntry>,
+    app: App,
     next_event: &mut dyn FnMut() -> Result<Option<Event>>,
     on_delete: &mut dyn FnMut(&str) -> Result<bool>,
     list_entries: &mut dyn FnMut() -> Result<Vec<WorkspaceEntry>>,
 ) -> Result<Option<PickerResult>> {
-    let mut app = App::new(entries);
+    let mut app = app;
 
     loop {
-        // Drain preview mailbox before drawing
+        // Drain mailboxes before drawing
         app.drain_preview_mailbox();
+        app.drain_refresh_mailbox();
 
         terminal.draw(|f| render(f, &mut app))?;
 
@@ -717,6 +812,7 @@ fn run_picker_inner<B: Backend>(
 /// entry list.
 pub fn run_picker(
     entries: Vec<WorkspaceEntry>,
+    repo_dir: PathBuf,
     mut on_delete: impl FnMut(&str) -> Result<bool>,
     mut list_entries: impl FnMut() -> Result<Vec<WorkspaceEntry>>,
 ) -> Result<Option<PickerResult>> {
@@ -731,9 +827,33 @@ pub fn run_picker(
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
 
+    // Set up background refresh threads
+    let app = App::new(entries);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let agent_sender = app.agent_refresh_mailbox.sender();
+    let refresh_sender = app.refresh_mailbox.sender();
+
+    // Agent status polling thread (~2s)
+    let agent_repo_dir = repo_dir.clone();
+    let agent_thread = spawn_refresh_thread(
+        std::time::Duration::from_secs(2),
+        Arc::clone(&stop),
+        agent_sender,
+        move || Some(crate::agent::read_agent_summaries(&agent_repo_dir)),
+    );
+
+    // Full VCS refresh thread (~10s)
+    let refresh_thread = spawn_refresh_thread(
+        std::time::Duration::from_secs(10),
+        Arc::clone(&stop),
+        refresh_sender,
+        move || crate::workspace::list_workspace_entries().ok(),
+    );
+
     let result = run_picker_inner(
         &mut terminal,
-        entries,
+        app,
         &mut || {
             if event::poll(std::time::Duration::from_millis(100))? {
                 Ok(Some(event::read()?))
@@ -744,6 +864,11 @@ pub fn run_picker(
         &mut on_delete,
         &mut list_entries,
     );
+
+    // Signal background threads to stop
+    stop.store(true, Ordering::Relaxed);
+    let _ = agent_thread.join();
+    let _ = refresh_thread.join();
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -767,6 +892,10 @@ struct MultiRepoApp {
     preview: PreviewState,
     preview_mailbox: Arc<Mutex<Option<PreviewState>>>,
     table_state: TableState,
+    /// Receives full workspace entry refreshes from background thread.
+    refresh_mailbox: Mailbox<Vec<WorkspaceEntry>>,
+    /// Receives agent status updates from background thread.
+    agent_refresh_mailbox: Mailbox<HashMap<String, AgentSummary>>,
 }
 
 impl MultiRepoApp {
@@ -786,6 +915,8 @@ impl MultiRepoApp {
             preview: PreviewState::Hidden,
             preview_mailbox: Arc::new(Mutex::new(None)),
             table_state: TableState::default().with_selected(0),
+            refresh_mailbox: Mailbox::new(),
+            agent_refresh_mailbox: Mailbox::new(),
         }
     }
 
@@ -854,6 +985,48 @@ impl MultiRepoApp {
             && let Some(state) = guard.take()
         {
             self.preview = state;
+        }
+    }
+
+    /// Drain refresh mailboxes, merging updated data into current state.
+    fn drain_refresh_mailbox(&mut self) {
+        // Check agent-only refresh (fast path, ~2s interval)
+        if let Some(summaries) = self.agent_refresh_mailbox.take() {
+            for entry in &mut self.entries {
+                // Multi-repo keys include repo name to avoid collisions
+                let key = format!(
+                    "{}:{}",
+                    entry.repo_name.as_deref().unwrap_or(""),
+                    entry.name
+                );
+                entry.agent_status = summaries.get(&key).cloned();
+            }
+        }
+
+        // Check full entry refresh (~10s interval)
+        if let Some(new_entries) = self.refresh_mailbox.take() {
+            let selected_name = self
+                .selected_entry_index()
+                .map(|idx| self.entries[idx].name.clone());
+
+            self.entries = new_entries;
+            sort_entries(&mut self.entries, self.sort_mode);
+            self.recompute_filter();
+
+            if let Some(ref name) = selected_name {
+                let new_selected = self
+                    .filtered_indices
+                    .iter()
+                    .position(|&i| self.entries[i].name == *name)
+                    .unwrap_or(0);
+                self.selected = new_selected;
+            } else {
+                self.selected = 0;
+            }
+            if self.selected >= self.total_rows() {
+                self.selected = self.total_rows().saturating_sub(1);
+            }
+            self.sync_table_state();
         }
     }
 
@@ -1048,14 +1221,15 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
 /// Event loop for the multi-repo picker. `next_event` is injectable for testing.
 fn run_picker_multi_repo_inner<B: Backend>(
     terminal: &mut Terminal<B>,
-    entries: Vec<WorkspaceEntry>,
+    app: MultiRepoApp,
     next_event: &mut dyn FnMut() -> Result<Option<Event>>,
 ) -> Result<Option<PickerResult>> {
-    let mut app = MultiRepoApp::new(entries);
+    let mut app = app;
 
     loop {
-        // Drain preview mailbox before drawing
+        // Drain mailboxes before drawing
         app.drain_preview_mailbox();
+        app.drain_refresh_mailbox();
 
         terminal.draw(|f| render_multi_repo(f, &mut app))?;
 
@@ -1147,13 +1321,64 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_picker_multi_repo_inner(&mut terminal, entries, &mut || {
+    let app = MultiRepoApp::new(entries);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let agent_sender = app.agent_refresh_mailbox.sender();
+    let refresh_sender = app.refresh_mailbox.sender();
+
+    // Collect unique repo dirs for agent polling
+    let repo_dirs: Vec<PathBuf> = {
+        let mut dirs = std::collections::HashSet::new();
+        for entry in &app.entries {
+            if let Some(repo_name) = &entry.repo_name {
+                let home = dirs::home_dir().unwrap_or_default();
+                dirs.insert(home.join(".dwm").join(repo_name));
+            }
+        }
+        dirs.into_iter().collect()
+    };
+
+    // Agent status polling thread (~2s)
+    let agent_thread = spawn_refresh_thread(
+        std::time::Duration::from_secs(2),
+        Arc::clone(&stop),
+        agent_sender,
+        move || {
+            let mut all_summaries = HashMap::new();
+            for repo_dir in &repo_dirs {
+                let repo_name = repo_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                for (ws_name, summary) in crate::agent::read_agent_summaries(repo_dir) {
+                    all_summaries.insert(format!("{}:{}", repo_name, ws_name), summary);
+                }
+            }
+            Some(all_summaries)
+        },
+    );
+
+    // Full VCS refresh thread (~10s)
+    let refresh_thread = spawn_refresh_thread(
+        std::time::Duration::from_secs(10),
+        Arc::clone(&stop),
+        refresh_sender,
+        move || crate::workspace::list_all_workspace_entries().ok(),
+    );
+
+    let result = run_picker_multi_repo_inner(&mut terminal, app, &mut || {
         if event::poll(std::time::Duration::from_millis(100))? {
             Ok(Some(event::read()?))
         } else {
             Ok(None)
         }
     });
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = agent_thread.join();
+    let _ = refresh_thread.join();
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -1368,7 +1593,7 @@ mod tests {
         let mut key_iter = keys.into_iter();
         run_picker_inner(
             &mut terminal,
-            entries,
+            App::new(entries),
             &mut || match key_iter.next() {
                 Some(code) => Ok(Some(key(code))),
                 None => Ok(Some(key(KeyCode::Esc))),
@@ -1386,9 +1611,11 @@ mod tests {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend)?;
         let mut key_iter = keys.into_iter();
-        run_picker_multi_repo_inner(&mut terminal, entries, &mut || match key_iter.next() {
-            Some(code) => Ok(Some(key(code))),
-            None => Ok(Some(key(KeyCode::Esc))),
+        run_picker_multi_repo_inner(&mut terminal, MultiRepoApp::new(entries), &mut || {
+            match key_iter.next() {
+                Some(code) => Ok(Some(key(code))),
+                None => Ok(Some(key(KeyCode::Esc))),
+            }
         })
     }
 
@@ -1620,7 +1847,7 @@ mod tests {
         // then we stop and inspect the buffer.
         run_picker_inner(
             &mut terminal,
-            entries,
+            App::new(entries),
             &mut || match keys.next() {
                 Some(code) => Ok(Some(key(code))),
                 // After processing keys, send Esc to exit so we can check the last frame
@@ -1948,6 +2175,321 @@ mod tests {
             "selected entry 'ws-19' should be visible after scrolling, buffer:\n{}",
             all_text,
         );
+    }
+
+    // ── Merge / drain unit tests ────────────────────────────────────
+
+    #[test]
+    fn merge_entries_preserves_selection() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+            make_named_entry_ranked("ws3", "/tmp/ws3", 2),
+        ];
+        let mut app = App::new(entries);
+        // Select ws2
+        app.next();
+        assert_eq!(app.entries[app.filtered_indices[app.selected]].name, "ws2");
+
+        // Merge with same entries (different order to prove re-sort works)
+        let new_entries = vec![
+            make_named_entry_ranked("ws3", "/tmp/ws3", 2),
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        app.merge_entries(new_entries);
+
+        // Selection should still be on ws2
+        assert_eq!(app.entries[app.filtered_indices[app.selected]].name, "ws2");
+    }
+
+    #[test]
+    fn merge_entries_resets_when_selected_disappears() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let mut app = App::new(entries);
+        // Select ws2
+        app.next();
+        assert_eq!(app.entries[app.filtered_indices[app.selected]].name, "ws2");
+
+        // Merge without ws2
+        let new_entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        app.merge_entries(new_entries);
+
+        // Should fall back to 0
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.entries[app.filtered_indices[app.selected]].name, "ws1");
+    }
+
+    #[test]
+    fn merge_entries_re_sorts() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let mut app = App::new(entries);
+
+        // Switch to name sort
+        app.sort_mode = SortMode::Name;
+        sort_entries(&mut app.entries, app.sort_mode);
+        app.recompute_filter();
+
+        // Merge with entries that would sort differently
+        let new_entries = vec![
+            make_named_entry_ranked("cherry", "/tmp/cherry", 0),
+            make_named_entry_ranked("apple", "/tmp/apple", 1),
+            make_named_entry_ranked("banana", "/tmp/banana", 2),
+        ];
+        app.merge_entries(new_entries);
+
+        // Verify sorted by name
+        let names: Vec<&str> = app.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn merge_entries_respects_filter() {
+        let entries = vec![
+            make_named_entry_ranked("apple", "/tmp/apple", 0),
+            make_named_entry_ranked("banana", "/tmp/banana", 1),
+        ];
+        let mut app = App::new(entries);
+
+        // Set a filter
+        app.filter_buf = "ban".to_string();
+        app.recompute_filter();
+        assert_eq!(app.filtered_indices.len(), 1);
+
+        // Merge in new entries
+        let new_entries = vec![
+            make_named_entry_ranked("apple", "/tmp/apple", 0),
+            make_named_entry_ranked("banana", "/tmp/banana", 1),
+            make_named_entry_ranked("bandana", "/tmp/bandana", 2),
+        ];
+        app.merge_entries(new_entries);
+
+        // Filter should still be applied — "ban" matches banana and bandana
+        assert_eq!(app.filtered_indices.len(), 2);
+        let visible_names: Vec<&str> = app
+            .filtered_indices
+            .iter()
+            .map(|&i| app.entries[i].name.as_str())
+            .collect();
+        assert!(visible_names.contains(&"banana"));
+        assert!(visible_names.contains(&"bandana"));
+    }
+
+    #[test]
+    fn drain_agent_updates_in_place() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let mut app = App::new(entries);
+
+        // Post agent summaries to the mailbox
+        let mut summaries = HashMap::new();
+        summaries.insert(
+            "ws1".to_string(),
+            AgentSummary {
+                waiting: 1,
+                working: 0,
+                idle: 0,
+            },
+        );
+        *app.agent_refresh_mailbox.0.lock().unwrap() = Some(summaries);
+
+        app.drain_refresh_mailbox();
+
+        // ws1 should have agent status, ws2 should not
+        assert!(
+            app.entries
+                .iter()
+                .find(|e| e.name == "ws1")
+                .unwrap()
+                .agent_status
+                .is_some()
+        );
+        assert!(
+            app.entries
+                .iter()
+                .find(|e| e.name == "ws2")
+                .unwrap()
+                .agent_status
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn drain_full_refresh() {
+        let entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        let mut app = App::new(entries);
+
+        // Post new entries to refresh mailbox
+        let new_entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws-new", "/tmp/ws-new", 1),
+        ];
+        *app.refresh_mailbox.0.lock().unwrap() = Some(new_entries);
+
+        app.drain_refresh_mailbox();
+
+        assert_eq!(app.entries.len(), 2);
+        assert!(app.entries.iter().any(|e| e.name == "ws-new"));
+    }
+
+    #[test]
+    fn drain_noop_when_empty() {
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let mut app = App::new(entries);
+        let original_len = app.entries.len();
+
+        // Drain with nothing posted
+        app.drain_refresh_mailbox();
+
+        assert_eq!(app.entries.len(), original_len);
+    }
+
+    // ── Background thread integration tests ──────────────────────────
+
+    #[test]
+    fn refresh_thread_posts_to_mailbox() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender = Arc::new(Mutex::new(None::<Vec<String>>));
+        let sender_clone = Arc::clone(&sender);
+
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        let handle = spawn_refresh_thread(
+            Duration::from_millis(50),
+            Arc::clone(&stop),
+            sender_clone,
+            move || {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                Some(vec!["hello".to_string()])
+            },
+        );
+
+        std::thread::sleep(Duration::from_millis(200));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Should have posted at least once
+        let data = sender.lock().unwrap().take();
+        assert!(data.is_some(), "expected data in mailbox");
+        assert_eq!(data.unwrap(), vec!["hello".to_string()]);
+
+        // Producer should have been called multiple times
+        assert!(call_count.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn refresh_thread_stops_on_flag() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender = Arc::new(Mutex::new(None::<u32>));
+
+        let handle = spawn_refresh_thread(
+            Duration::from_millis(500),
+            Arc::clone(&stop),
+            sender,
+            || Some(42),
+        );
+
+        // Stop immediately
+        stop.store(true, Ordering::Relaxed);
+        let start = std::time::Instant::now();
+        handle.join().unwrap();
+        let elapsed = start.elapsed();
+
+        // Thread should exit within ~600ms (one sleep interval + margin)
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "thread took too long to stop: {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn agent_thread_posts_summaries() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender = Arc::new(Mutex::new(None::<HashMap<String, AgentSummary>>));
+        let sender_clone = Arc::clone(&sender);
+
+        let handle = spawn_refresh_thread(
+            Duration::from_millis(50),
+            Arc::clone(&stop),
+            sender_clone,
+            move || {
+                let mut map = HashMap::new();
+                map.insert(
+                    "ws1".to_string(),
+                    AgentSummary {
+                        waiting: 0,
+                        working: 1,
+                        idle: 0,
+                    },
+                );
+                Some(map)
+            },
+        );
+
+        std::thread::sleep(Duration::from_millis(150));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        let data = sender.lock().unwrap().take();
+        assert!(data.is_some());
+        let summaries = data.unwrap();
+        assert!(summaries.contains_key("ws1"));
+        assert_eq!(summaries["ws1"].working, 1);
+    }
+
+    // ── Full integration test with run_picker_inner + mailbox ────────
+
+    #[test]
+    fn run_picker_inner_sees_refreshed_data() {
+        // Start with one entry, post a refresh with two entries via mailbox,
+        // then verify the picker uses the updated entries.
+        let entries = vec![make_named_entry_ranked("ws1", "/tmp/ws1", 0)];
+        let app = App::new(entries);
+
+        // Pre-load the refresh mailbox with new entries
+        let new_entries = vec![
+            make_named_entry_ranked("ws-alpha", "/tmp/ws-alpha", 0),
+            make_named_entry_ranked("ws-beta", "/tmp/ws-beta", 1),
+        ];
+        *app.refresh_mailbox.0.lock().unwrap() = Some(new_entries);
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Feed: None (triggers drain), then j (move down), Enter (select ws-beta)
+        let mut events = vec![
+            None,
+            Some(key(KeyCode::Char('j'))),
+            Some(key(KeyCode::Enter)),
+        ]
+        .into_iter();
+
+        let result = run_picker_inner(
+            &mut terminal,
+            app,
+            &mut || Ok(events.next().unwrap_or(Some(key(KeyCode::Esc)))),
+            &mut |_| Ok(false),
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+
+        match result {
+            Some(PickerResult::Selected(path)) => assert_eq!(path, "/tmp/ws-beta"),
+            other => panic!("expected Selected ws-beta, got {:?}", other),
+        }
     }
 
     #[test]
