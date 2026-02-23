@@ -24,7 +24,11 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Install jj
-        uses: jj-vcs/jj-install@v0
+        run: |
+          curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.38.0/jj-v0.38.0-x86_64-unknown-linux-musl.tar.gz | tar xz
+          sudo mv jj /usr/local/bin/
+          jj config set --user user.name "CI"
+          jj config set --user user.email "ci@test"
 
       - name: Configure git
         run: |
