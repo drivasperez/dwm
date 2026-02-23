@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, bail};
+use owo_colors::OwoColorize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{names, vcs};
+use crate::{agent, names, vcs};
 
 /// Whether a workspace's changes have been merged into trunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +118,12 @@ fn new_workspace_inner(
     };
 
     let ws_name = match name {
-        Some(n) => n,
+        Some(n) => {
+            if n.starts_with('.') {
+                bail!("workspace name cannot start with '.'");
+            }
+            n
+        }
         None => names::generate_unique(&dir),
     };
 
@@ -130,9 +136,14 @@ fn new_workspace_inner(
         );
     }
 
-    eprintln!("creating workspace '{}'...", ws_name);
+    eprintln!("{} workspace '{}'...", "creating".cyan(), ws_name.bold());
     deps.backend.workspace_add(&root, &ws_path, &ws_name, at)?;
-    eprintln!("workspace '{}' created at {}", ws_name, ws_path.display());
+    eprintln!(
+        "{} workspace '{}' created at {}",
+        "✓".green(),
+        ws_name.bold(),
+        ws_path.display().dimmed()
+    );
 
     // stdout: path for shell wrapper to cd into
     println!("{}", ws_path.display());
@@ -228,19 +239,28 @@ fn delete_workspace_inner(
     let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
     if verbose {
-        eprintln!("forgetting workspace '{}'...", ws_name);
+        eprintln!(
+            "{} workspace '{}'...",
+            "forgetting".yellow(),
+            ws_name.bold()
+        );
     }
     deps.backend
         .workspace_remove(&main_repo, &ws_name, &ws_path)?;
 
     if ws_path.exists() {
         if verbose {
-            eprintln!("removing {}...", ws_path.display());
+            eprintln!("{} {}...", "removing".red(), ws_path.display().dimmed());
         }
         fs::remove_dir_all(&ws_path)?;
     }
+
+    // Clean up agent status files for this workspace
+    let rd = repo_dir(&deps.dwm_base, &repo_name_str);
+    agent::remove_agent_statuses_for_workspace(&rd, &ws_name);
+
     if verbose {
-        eprintln!("workspace '{}' deleted", ws_name);
+        eprintln!("{} workspace '{}' deleted", "✓".green(), ws_name.bold());
     }
 
     if is_inside(&deps.cwd, &ws_path) {
@@ -404,6 +424,10 @@ fn rename_workspace_inner(
         );
     }
 
+    if new_name.starts_with('.') {
+        bail!("workspace name cannot start with '.'");
+    }
+
     let new_path = deps.dwm_base.join(&repo_name_str).join(new_name);
     if new_path.exists() {
         bail!(
@@ -415,11 +439,21 @@ fn rename_workspace_inner(
 
     let main_repo = main_repo_path(&deps.dwm_base, &repo_name_str)?;
 
-    eprintln!("renaming workspace '{}' -> '{}'...", old_name, new_name);
+    eprintln!(
+        "{} workspace '{}' -> '{}'...",
+        "renaming".cyan(),
+        old_name.bold(),
+        new_name.bold()
+    );
     deps.backend
         .workspace_rename(&main_repo, &old_path, &new_path, old_name, new_name)?;
 
-    eprintln!("workspace '{}' renamed to '{}'", old_name, new_name);
+    eprintln!(
+        "{} workspace '{}' renamed to '{}'",
+        "✓".green(),
+        old_name.bold(),
+        new_name.bold()
+    );
 
     if is_inside(&deps.cwd, &old_path) {
         let relative = deps.cwd.strip_prefix(&old_path)?;
@@ -427,6 +461,28 @@ fn rename_workspace_inner(
     } else {
         Ok(None)
     }
+}
+
+/// Return the `~/.dwm/<repo>/` directory for the current working directory.
+pub fn current_repo_dir() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let dwm_base = dwm_base_dir()?;
+
+    let repo_name_str = if cwd.starts_with(&dwm_base) {
+        let relative = cwd.strip_prefix(&dwm_base)?;
+        relative
+            .components()
+            .next()
+            .context("could not determine repo from workspace path")?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        let backend = vcs::detect(&cwd)?;
+        backend.repo_name_from(&cwd)?
+    };
+
+    Ok(repo_dir(&dwm_base, &repo_name_str))
 }
 
 /// Collect [`WorkspaceEntry`] values for all workspaces belonging to the
@@ -482,6 +538,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         return Ok(Vec::new());
     }
 
+    let mut agent_summaries = agent::read_agent_summaries(&rd);
+
     let main_ws_name = deps.backend.main_workspace_name();
     let vcs_workspaces = deps.backend.workspace_list(&main_repo).unwrap_or_default();
 
@@ -519,6 +577,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         repo_name: None,
         main_repo_path: main_repo.clone(),
         vcs_type,
+        agent_status: agent_summaries.remove(main_ws_name),
     });
 
     // Scan workspace dirs
@@ -530,6 +589,11 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Skip internal dot-prefixed entries (.main-repo, .vcs-type, .agent-status, etc.)
+        if name.starts_with('.') {
+            continue;
+        }
 
         let ws_info = vcs_workspaces
             .iter()
@@ -562,6 +626,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
                 MergeStatus::Unmerged
             };
 
+        let agent_status = agent_summaries.remove(&name);
         entries.push(WorkspaceEntry {
             is_stale: compute_is_stale(merge_status, modified),
             repo_name: None,
@@ -575,6 +640,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             bookmarks: info.bookmarks,
             main_repo_path: main_repo.clone(),
             vcs_type,
+            agent_status,
         });
     }
 
@@ -599,6 +665,7 @@ pub struct WorkspaceEntry {
     pub repo_name: Option<String>,
     pub main_repo_path: PathBuf,
     pub vcs_type: vcs::VcsType,
+    pub agent_status: Option<agent::AgentSummary>,
 }
 
 /// Determine whether a non-main workspace should be shown as stale.
@@ -712,7 +779,12 @@ pub fn format_time_ago(time: Option<SystemTime>) -> String {
 
 /// Print a non-interactive tabular workspace summary to stderr.
 pub fn print_status(entries: &[WorkspaceEntry]) {
-    let mut out = std::io::stderr().lock();
+    let out = std::io::stderr().lock();
+    let _ = print_status_to(entries, out);
+}
+
+/// Core logic for printing the status table to any Write implementation.
+fn print_status_to<W: Write>(entries: &[WorkspaceEntry], mut out: W) -> Result<()> {
     // Column widths
     let name_w = entries
         .iter()
@@ -734,13 +806,49 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
         .max()
         .unwrap_or(9)
         .max(9);
+    let has_agents = entries
+        .iter()
+        .any(|e| e.agent_status.as_ref().is_some_and(|s| !s.is_empty()));
+    let agent_w = if has_agents {
+        entries
+            .iter()
+            .map(|e| {
+                e.agent_status
+                    .as_ref()
+                    .map(|s| s.to_string().len())
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(6)
+            .max(6)
+    } else {
+        0
+    };
 
     // Header
-    let _ = writeln!(
-        out,
-        "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  CHANGES",
-        "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED",
-    );
+    if has_agents {
+        let _ = writeln!(
+            out,
+            "{}",
+            format!(
+                "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {:<agent_w$}  CHANGES",
+                "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED", "AGENTS",
+            )
+            .bold()
+            .dimmed()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{}",
+            format!(
+                "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  CHANGES",
+                "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED",
+            )
+            .bold()
+            .dimmed()
+        );
+    }
 
     for entry in entries {
         let name_text = if entry.is_main {
@@ -751,11 +859,55 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
             entry.name.clone()
         };
 
+        let dim = entry.is_stale;
+        let name_colored = {
+            let s = format!("{:<name_w$}", name_text);
+            if dim {
+                s.dimmed().to_string()
+            } else {
+                s.cyan().to_string()
+            }
+        };
+
+        let change_colored = {
+            let s = format!("{:<change_w$}", entry.change_id);
+            if dim {
+                s.dimmed().to_string()
+            } else {
+                s.magenta().to_string()
+            }
+        };
+
         let desc = entry.description.lines().next().unwrap_or("");
         let desc_text: String = desc.chars().take(40).collect();
+        let desc_colored = {
+            let s = format!("{:<40}", desc_text);
+            if dim {
+                s.dimmed().to_string()
+            } else {
+                s.white().to_string()
+            }
+        };
 
         let bookmarks_text = entry.bookmarks.join(", ");
+        let bookmarks_colored = {
+            let s = format!("{:<bookmark_w$}", bookmarks_text);
+            if dim {
+                s.dimmed().to_string()
+            } else {
+                s.blue().to_string()
+            }
+        };
+
         let time_text = format_time_ago(entry.last_modified);
+        let time_colored = {
+            let s = format!("{:<9}", time_text);
+            if dim {
+                s.dimmed().to_string()
+            } else {
+                s.yellow().to_string()
+            }
+        };
 
         let stat = &entry.diff_stat;
         let changes_text = if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0
@@ -776,12 +928,58 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
             }
         };
 
-        let _ = writeln!(
-            out,
-            "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {}",
-            name_text, entry.change_id, desc_text, bookmarks_text, time_text, changes_text,
-        );
+        let changes_colored = if dim {
+            changes_text.dimmed().to_string()
+        } else if stat.deletions > stat.insertions {
+            changes_text.red().to_string()
+        } else if stat.insertions > 0 {
+            changes_text.green().to_string()
+        } else {
+            changes_text.dimmed().to_string()
+        };
+
+        if has_agents {
+            let agent_colored = match &entry.agent_status {
+                Some(summary) if !summary.is_empty() => {
+                    let text = format!("{:<agent_w$}", summary);
+                    if dim {
+                        text.dimmed().to_string()
+                    } else {
+                        match summary.most_urgent() {
+                            Some(crate::agent::AgentStatus::Waiting) => text.yellow().to_string(),
+                            Some(crate::agent::AgentStatus::Working) => text.green().to_string(),
+                            _ => text.dimmed().to_string(),
+                        }
+                    }
+                }
+                _ => format!("{:<agent_w$}", ""),
+            };
+
+            let _ = writeln!(
+                out,
+                "{}  {}  {}  {}  {}  {}  {}",
+                name_colored,
+                change_colored,
+                desc_colored,
+                bookmarks_colored,
+                time_colored,
+                agent_colored,
+                changes_colored,
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{}  {}  {}  {}  {}  {}",
+                name_colored,
+                change_colored,
+                desc_colored,
+                bookmarks_colored,
+                time_colored,
+                changes_colored,
+            );
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -789,6 +987,13 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+
+    fn print_status_to_string(entries: &[WorkspaceEntry]) -> String {
+        owo_colors::set_override(true);
+        let mut buf = Vec::new();
+        print_status_to(entries, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
 
     #[test]
     fn is_inside_detects_cwd_within_workspace() {
@@ -1024,6 +1229,56 @@ mod tests {
     }
 
     #[test]
+    fn list_entries_skips_dot_prefixed_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
+
+        // Create a workspace and an internal dot-prefixed directory
+        let ws_dir = dwm_base.join(format!("{}/feat-x", dir_name));
+        fs::create_dir_all(&ws_dir).unwrap();
+        let agent_dir = dwm_base.join(format!("{}/.agent-status", dir_name));
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let workspaces = vec![
+            (
+                "default".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "aaa".to_string(),
+                    description: "".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
+            (
+                "feat-x".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "bbb".to_string(),
+                    description: "".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
+        ];
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), workspaces);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: ws_dir,
+            dwm_base,
+        };
+
+        let entries = list_workspace_entries_inner(&deps).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains(&".agent-status"),
+            "dot-prefixed dirs should be excluded, got: {:?}",
+            names
+        );
+        assert!(names.contains(&"feat-x"));
+    }
+
+    #[test]
     fn list_entries_from_repo_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
@@ -1163,6 +1418,28 @@ mod tests {
         // Second attempt should fail
         let err = new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap_err();
         assert!(err.to_string().contains("already exists"), "error: {}", err);
+    }
+
+    #[test]
+    fn new_workspace_dot_prefix_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base: tmp.path().join("dwm"),
+        };
+
+        let err =
+            new_workspace_inner(&deps, Some(".agent-status".to_string()), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot start with '.'"),
+            "error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1522,6 +1799,31 @@ mod tests {
         assert!(err.to_string().contains("cannot rename"), "error: {}", err);
     }
 
+    #[test]
+    fn rename_workspace_dot_prefix_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
+
+        fs::create_dir_all(dwm_base.join(format!("{}/old-name", dir_name))).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let err = rename_workspace_inner(&deps, "old-name", ".hidden").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot start with '.'"),
+            "error: {}",
+            err
+        );
+    }
+
     // ── switch_workspace_inner tests ──────────────────────────────
 
     #[test]
@@ -1819,6 +2121,7 @@ mod tests {
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
+                agent_status: None,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -1833,10 +2136,85 @@ mod tests {
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
+                agent_status: None,
             },
         ];
         // Should not panic; output goes to stderr
         print_status(&entries);
+    }
+
+    #[test]
+    fn status_table_snapshot() {
+        // Use fixed times relative to "now" for format_time_ago
+        let now = SystemTime::now();
+        let t_5m = now - std::time::Duration::from_secs(300);
+        let t_2h = now - std::time::Duration::from_secs(7200);
+
+        let entries = vec![
+            WorkspaceEntry {
+                name: "default".to_string(),
+                path: PathBuf::from("/tmp/repo"),
+                last_modified: Some(t_5m),
+                diff_stat: vcs::DiffStat {
+                    files_changed: 1,
+                    insertions: 10,
+                    deletions: 2,
+                },
+                is_main: true,
+                change_id: "abc12345".to_string(),
+                description: "refactor help system".to_string(),
+                bookmarks: vec!["main".to_string()],
+                is_stale: false,
+                repo_name: None,
+                main_repo_path: PathBuf::from("/tmp/repo"),
+                vcs_type: vcs::VcsType::Jj,
+                agent_status: None,
+            },
+            WorkspaceEntry {
+                name: "hazy-quail".to_string(),
+                path: PathBuf::from("/tmp/hazy-quail"),
+                last_modified: Some(t_2h),
+                diff_stat: vcs::DiffStat {
+                    files_changed: 5,
+                    insertions: 100,
+                    deletions: 50,
+                },
+                is_main: false,
+                change_id: "tqqorvwl".to_string(),
+                description: "Live-updating list view".to_string(),
+                bookmarks: vec![],
+                is_stale: false,
+                repo_name: None,
+                main_repo_path: PathBuf::from("/tmp/repo"),
+                vcs_type: vcs::VcsType::Jj,
+                agent_status: Some(crate::agent::AgentSummary {
+                    waiting: 1,
+                    working: 0,
+                    idle: 0,
+                }),
+            },
+        ];
+
+        let out = print_status_to_string(&entries);
+
+        // Assert some key properties of the table
+        assert!(out.contains("NAME"));
+        assert!(out.contains("default (main)"));
+        assert!(out.contains("abc12345"));
+        assert!(out.contains("refactor help system"));
+        assert!(out.contains("main"));
+        assert!(out.contains("5m ago"));
+        assert!(out.contains("+10 -2"));
+
+        assert!(out.contains("hazy-quail"));
+        assert!(out.contains("tqqorvwl"));
+        assert!(out.contains("Live-updating list view"));
+        assert!(out.contains("2h ago"));
+        assert!(out.contains("1 waiting"));
+        assert!(out.contains("+100 -50"));
+
+        // Verify ANSI codes are present (cyan for names)
+        assert!(out.contains("\x1b[36m"));
     }
 
     // ── E2E tests with real git repos ───────────────────────────────

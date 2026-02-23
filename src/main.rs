@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod git;
 #[allow(dead_code)]
@@ -30,9 +31,11 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            let repo_dir = workspace::current_repo_dir()?;
             let entries = workspace::list_workspace_entries()?;
             match tui::run_picker(
                 entries,
+                repo_dir,
                 |name| {
                     workspace::delete_workspace(
                         Some(name.to_string()),
@@ -59,8 +62,26 @@ fn main() -> Result<()> {
         Commands::Delete { name } => {
             workspace::delete_workspace(name, workspace::DeleteOutput::Verbose).map(|_| ())
         }
+        Commands::HookHandler => agent::handle_hook(),
+        Commands::AgentSetup => agent::setup_agent_hooks(),
+        Commands::Setup => {
+            use owo_colors::OwoColorize;
+            eprintln!("{}", "dwm setup".bold().cyan());
+            eprintln!();
+            eprintln!("{}", "Shell integration:".bold().yellow());
+            shell::setup_shell_interactive()?;
+            eprintln!();
+            eprintln!("{}", "Agent status tracking:".bold().yellow());
+            agent::setup_agent_hooks()?;
+            Ok(())
+        }
         Commands::Version => {
-            println!("dwm {}", env!("CARGO_PKG_VERSION"));
+            use owo_colors::OwoColorize;
+            println!(
+                "{} {}",
+                "dwm".bold().cyan(),
+                env!("CARGO_PKG_VERSION").bright_white()
+            );
             Ok(())
         }
         Commands::ShellSetup {

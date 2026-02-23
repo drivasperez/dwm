@@ -21,6 +21,15 @@
 - [ ] Shell prompt integration — Export `dwm_WORKSPACE` env var and provide snippets for starship/p10k/oh-my-zsh showing current workspace name + change ID.
 - [ ] Workspace templates/hooks — `.dwm.toml` in repo root to configure default revset, auto-descriptions, post-create hooks (e.g., `cargo build`).
 
+## Agent status
+
+- [x] Core agent status tracking — On-disk status files (`.agent-status/*.json`) with `{workspace, status, updated_at}` protocol, stale-entry expiry, and per-workspace summary aggregation.
+- [x] Claude Code integration — Hook handler (`dwm hook-handler`) maps Claude Code events (`PreToolUse`/`Stop`/`Notification`/`SessionEnd`) to working/idle/waiting status. `dwm agent-setup` installs hooks into `~/.claude/settings.json`.
+- [x] TUI display — Agent column in the workspace picker showing aggregated status counts with color coding.
+- [ ] Codex CLI integration — `notify` handler mapping `agent-turn-complete` → idle and `approval-requested` → waiting. Codex currently lacks pre-tool-use and session-end events, so working/cleanup detection will be limited.
+- [ ] OpenCode integration — TypeScript plugin using `session.idle`, `session.created`, `session.deleted`, and `session.status` events. Different execution model (long-lived process vs. command invocation) will need a plugin that shells out to `dwm hook-handler` or writes status files directly.
+- [ ] Unified `dwm agent-setup` — Detect installed harnesses and configure all of them, or accept `--harness claude|codex|opencode` flag.
+
 ## Wild cards
 
 - [ ] `dwm switch` (no TUI) — `cd`-style shortcut with tab-completion via `dwm completions zsh/bash/fish`.

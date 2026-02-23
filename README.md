@@ -59,9 +59,29 @@ dwm status              # non-interactive workspace summary
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
+dwm agent-setup         # set up Claude Code agent status tracking
 dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
+
+## Agent status tracking
+
+dwm can show the status of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents running in your workspaces. The TUI's "Agent" column displays per-workspace counts like `2 waiting, 1 working`.
+
+To set it up, run:
+
+```sh
+dwm agent-setup
+```
+
+This installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) into `~/.claude/settings.json` that report agent status to dwm via the `dwm hook-handler` command.
+
+**Statuses:**
+- **waiting** (yellow) — agent needs user input or permission approval
+- **working** (green) — agent is actively executing
+- **idle** (gray) — agent finished its turn, waiting for the next prompt
+
+Status is tracked per session, so multiple agents in the same workspace are counted independently.
 
 ## Build
 

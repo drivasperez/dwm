@@ -1,4 +1,5 @@
 use anyhow::Result;
+use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -123,6 +124,26 @@ fn display_config_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+/// Run interactive shell setup: detect the shell and offer to install.
+pub fn setup_shell_interactive() -> Result<()> {
+    let shell = detect_shell();
+    match shell {
+        Some(s) => {
+            let installed = offer_install(s)?;
+            if !installed {
+                eprintln!("{}", "  Add this to your shell config manually:".dimmed());
+                eprintln!("    {}", s.setup_line().bold());
+            }
+        }
+        None => {
+            eprintln!("{}", "  Could not detect your shell.".red());
+            eprintln!("{}", "  Add this to your shell config manually:".dimmed());
+            eprintln!("    {}", "eval \"$(dwm shell-setup)\"".bold());
+        }
+    }
+    Ok(())
+}
+
 /// Offer to append the setup line to the user's shell config file.
 /// Returns `true` if the hint should be suppressed (already installed or just installed).
 fn offer_install(shell: Shell) -> Result<bool> {
@@ -134,13 +155,17 @@ fn offer_install(shell: Shell) -> Result<bool> {
     if config.exists() {
         let contents = std::fs::read_to_string(&config)?;
         if contents.contains(setup_line) {
-            eprintln!("# Already installed in {display}");
+            eprintln!(
+                "  {} Already installed in {}",
+                "✓".green(),
+                display.dimmed()
+            );
             return Ok(true);
         }
     }
 
     // Prompt the user. Read from /dev/tty so this works even if stdin is redirected.
-    eprint!("Add to {display}? [y/N] ");
+    eprint!("  {} Add to {}? [y/N] ", "?".bold().cyan(), display.bold());
     let tty = std::fs::File::open("/dev/tty");
     let response = match tty {
         Ok(f) => {
@@ -170,7 +195,7 @@ fn offer_install(shell: Shell) -> Result<bool> {
             writeln!(file)?;
         }
         writeln!(file, "{setup_line}")?;
-        eprintln!("# Added to {display}");
+        eprintln!("  {} Added to {}", "✓".green(), display.dimmed());
         Ok(true)
     } else {
         Ok(false)
@@ -193,12 +218,12 @@ pub fn print_shell_setup(shell: Option<Shell>) -> Result<()> {
                     // Show the manual hint.
                     match s {
                         Shell::Fish => {
-                            eprintln!("# Add this to your fish config:");
-                            eprintln!("#   {}", s.setup_line());
+                            eprintln!("{}", "# Add this to your fish config:".dimmed());
+                            eprintln!("{} {}", "# ".dimmed(), s.setup_line().bold());
                         }
                         Shell::Bash | Shell::Zsh => {
-                            eprintln!("# Add this to your shell rc file:");
-                            eprintln!("#   {}", s.setup_line());
+                            eprintln!("{}", "# Add this to your shell rc file:".dimmed());
+                            eprintln!("{} {}", "# ".dimmed(), s.setup_line().bold());
                         }
                     }
                 }
@@ -208,8 +233,8 @@ pub fn print_shell_setup(shell: Option<Shell>) -> Result<()> {
             // Can't detect shell, emit posix and show generic hint.
             println!("{}", posix_function());
             if std::io::stdout().is_terminal() {
-                eprintln!("# Add this to your shell rc file:");
-                eprintln!("#   eval \"$(dwm shell-setup)\"");
+                eprintln!("{}", "# Add this to your shell rc file:".dimmed());
+                eprintln!("{} {}", "# ".dimmed(), "eval \"$(dwm shell-setup)\"".bold());
             }
         }
     }
