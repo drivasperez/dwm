@@ -117,7 +117,12 @@ fn new_workspace_inner(
     };
 
     let ws_name = match name {
-        Some(n) => n,
+        Some(n) => {
+            if n.starts_with('.') {
+                bail!("workspace name cannot start with '.'");
+            }
+            n
+        }
         None => names::generate_unique(&dir),
     };
 
@@ -409,6 +414,10 @@ fn rename_workspace_inner(
         );
     }
 
+    if new_name.starts_with('.') {
+        bail!("workspace name cannot start with '.'");
+    }
+
     let new_path = deps.dwm_base.join(&repo_name_str).join(new_name);
     if new_path.exists() {
         bail!(
@@ -538,6 +547,11 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Skip internal dot-prefixed entries (.main-repo, .vcs-type, .agent-status, etc.)
+        if name.starts_with('.') {
+            continue;
+        }
 
         let ws_info = vcs_workspaces
             .iter()
@@ -745,13 +759,39 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
         .max()
         .unwrap_or(9)
         .max(9);
+    let has_agents = entries
+        .iter()
+        .any(|e| e.agent_status.as_ref().is_some_and(|s| !s.is_empty()));
+    let agent_w = if has_agents {
+        entries
+            .iter()
+            .map(|e| {
+                e.agent_status
+                    .as_ref()
+                    .map(|s| s.to_string().len())
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(6)
+            .max(6)
+    } else {
+        0
+    };
 
     // Header
-    let _ = writeln!(
-        out,
-        "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  CHANGES",
-        "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED",
-    );
+    if has_agents {
+        let _ = writeln!(
+            out,
+            "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {:<agent_w$}  CHANGES",
+            "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED", "AGENTS",
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  CHANGES",
+            "NAME", "CHANGE", "DESCRIPTION", "BOOKMARKS", "MODIFIED",
+        );
+    }
 
     for entry in entries {
         let name_text = if entry.is_main {
@@ -787,11 +827,31 @@ pub fn print_status(entries: &[WorkspaceEntry]) {
             }
         };
 
-        let _ = writeln!(
-            out,
-            "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {}",
-            name_text, entry.change_id, desc_text, bookmarks_text, time_text, changes_text,
-        );
+        if has_agents {
+            let agent_text = entry
+                .agent_status
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {:<agent_w$}  {}",
+                name_text,
+                entry.change_id,
+                desc_text,
+                bookmarks_text,
+                time_text,
+                agent_text,
+                changes_text,
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{:<name_w$}  {:<change_w$}  {:<40}  {:<bookmark_w$}  {:<9}  {}",
+                name_text, entry.change_id, desc_text, bookmarks_text, time_text, changes_text,
+            );
+        }
     }
 }
 
@@ -1035,6 +1095,56 @@ mod tests {
     }
 
     #[test]
+    fn list_entries_skips_dot_prefixed_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
+
+        // Create a workspace and an internal dot-prefixed directory
+        let ws_dir = dwm_base.join(format!("{}/feat-x", dir_name));
+        fs::create_dir_all(&ws_dir).unwrap();
+        let agent_dir = dwm_base.join(format!("{}/.agent-status", dir_name));
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let workspaces = vec![
+            (
+                "default".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "aaa".to_string(),
+                    description: "".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
+            (
+                "feat-x".to_string(),
+                vcs::WorkspaceInfo {
+                    change_id: "bbb".to_string(),
+                    description: "".to_string(),
+                    bookmarks: vec![],
+                },
+            ),
+        ];
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), workspaces);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: ws_dir,
+            dwm_base,
+        };
+
+        let entries = list_workspace_entries_inner(&deps).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains(&".agent-status"),
+            "dot-prefixed dirs should be excluded, got: {:?}",
+            names
+        );
+        assert!(names.contains(&"feat-x"));
+    }
+
+    #[test]
     fn list_entries_from_repo_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = tmp.path().join("repos/myrepo");
@@ -1174,6 +1284,28 @@ mod tests {
         // Second attempt should fail
         let err = new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap_err();
         assert!(err.to_string().contains("already exists"), "error: {}", err);
+    }
+
+    #[test]
+    fn new_workspace_dot_prefix_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base: tmp.path().join("dwm"),
+        };
+
+        let err =
+            new_workspace_inner(&deps, Some(".agent-status".to_string()), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot start with '.'"),
+            "error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1531,6 +1663,31 @@ mod tests {
 
         let err = rename_workspace_inner(&deps, "default", "new-name").unwrap_err();
         assert!(err.to_string().contains("cannot rename"), "error: {}", err);
+    }
+
+    #[test]
+    fn rename_workspace_dot_prefix_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&main_repo).unwrap();
+        let dir_name = vcs::repo_dir_name(&main_repo);
+        let dwm_base = setup_dwm_dir(tmp.path(), &dir_name, &main_repo);
+
+        fs::create_dir_all(dwm_base.join(format!("{}/old-name", dir_name))).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            dwm_base,
+        };
+
+        let err = rename_workspace_inner(&deps, "old-name", ".hidden").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot start with '.'"),
+            "error: {}",
+            err
+        );
     }
 
     // ── switch_workspace_inner tests ──────────────────────────────
