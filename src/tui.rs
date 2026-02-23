@@ -332,6 +332,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         "Bookmarks",
         "Modified",
         "Changes",
+        "Agent",
     ]
     .iter()
     .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
@@ -395,6 +396,22 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Color::DarkGray
             };
 
+            let (agent_text, agent_fg) = match &entry.agent_status {
+                Some(summary) if !summary.is_empty() => {
+                    let color = if dim {
+                        Color::DarkGray
+                    } else {
+                        match summary.most_urgent() {
+                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
+                            Some(crate::agent::AgentStatus::Working) => Color::Green,
+                            _ => Color::DarkGray,
+                        }
+                    };
+                    (summary.to_string(), color)
+                }
+                _ => (String::new(), Color::DarkGray),
+            };
+
             Row::new(vec![
                 Cell::from(name_text).style(Style::default().fg(name_fg)),
                 Cell::from(change_text).style(Style::default().fg(change_fg)),
@@ -402,6 +419,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(bookmarks_text).style(Style::default().fg(bookmark_fg)),
                 Cell::from(time_text).style(Style::default().fg(time_fg)),
                 Cell::from(changes_text).style(Style::default().fg(changes_fg)),
+                Cell::from(agent_text).style(Style::default().fg(agent_fg)),
             ])
         })
         .collect();
@@ -431,17 +449,19 @@ fn render(frame: &mut Frame, app: &mut App) {
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
+            Cell::from(""),
         ])
         .style(create_style),
     );
 
     let widths = [
-        Constraint::Percentage(15),
-        Constraint::Percentage(8),
-        Constraint::Percentage(35),
         Constraint::Percentage(14),
+        Constraint::Percentage(8),
+        Constraint::Percentage(27),
         Constraint::Percentage(13),
-        Constraint::Percentage(15),
+        Constraint::Percentage(10),
+        Constraint::Percentage(12),
+        Constraint::Percentage(16),
     ];
 
     let table = Table::new(rows, widths)
@@ -886,6 +906,7 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
         "Bookmarks",
         "Modified",
         "Changes",
+        "Agent",
     ]
     .iter()
     .map(|h| Cell::from(*h).style(Style::default().fg(Color::White).bold()));
@@ -947,6 +968,22 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
                 Color::DarkGray
             };
 
+            let (agent_text, agent_fg) = match &entry.agent_status {
+                Some(summary) if !summary.is_empty() => {
+                    let color = if dim {
+                        Color::DarkGray
+                    } else {
+                        match summary.most_urgent() {
+                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
+                            Some(crate::agent::AgentStatus::Working) => Color::Green,
+                            _ => Color::DarkGray,
+                        }
+                    };
+                    (summary.to_string(), color)
+                }
+                _ => (String::new(), Color::DarkGray),
+            };
+
             Row::new(vec![
                 Cell::from(repo_text).style(Style::default().fg(Color::Green)),
                 Cell::from(name_text).style(Style::default().fg(name_fg)),
@@ -955,17 +992,19 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
                 Cell::from(bookmarks_text).style(Style::default().fg(bookmark_fg)),
                 Cell::from(time_text).style(Style::default().fg(time_fg)),
                 Cell::from(changes_text).style(Style::default().fg(changes_fg)),
+                Cell::from(agent_text).style(Style::default().fg(agent_fg)),
             ])
         })
         .collect();
 
     let widths = [
         Constraint::Percentage(10),
+        Constraint::Percentage(11),
+        Constraint::Percentage(7),
+        Constraint::Percentage(24),
+        Constraint::Percentage(11),
+        Constraint::Percentage(10),
         Constraint::Percentage(12),
-        Constraint::Percentage(8),
-        Constraint::Percentage(30),
-        Constraint::Percentage(12),
-        Constraint::Percentage(13),
         Constraint::Percentage(15),
     ];
 
@@ -1155,6 +1194,7 @@ mod tests {
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
+            agent_status: None,
         }
     }
 
@@ -1229,6 +1269,7 @@ mod tests {
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
+            agent_status: None,
         }
     }
 
@@ -1367,6 +1408,7 @@ mod tests {
             repo_name: None,
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
+            agent_status: None,
         }
     }
 

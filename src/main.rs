@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod git;
 #[allow(dead_code)]
@@ -59,6 +60,8 @@ fn main() -> Result<()> {
         Commands::Delete { name } => {
             workspace::delete_workspace(name, workspace::DeleteOutput::Verbose).map(|_| ())
         }
+        Commands::HookHandler => agent::handle_hook(),
+        Commands::AgentSetup => agent::setup_agent_hooks(),
         Commands::Version => {
             println!("dwm {}", env!("CARGO_PKG_VERSION"));
             Ok(())

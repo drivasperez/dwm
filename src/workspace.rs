@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{names, vcs};
+use crate::{agent, names, vcs};
 
 /// Whether a workspace's changes have been merged into trunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +239,11 @@ fn delete_workspace_inner(
         }
         fs::remove_dir_all(&ws_path)?;
     }
+
+    // Clean up agent status files for this workspace
+    let rd = repo_dir(&deps.dwm_base, &repo_name_str);
+    agent::remove_agent_statuses_for_workspace(&rd, &ws_name);
+
     if verbose {
         eprintln!("workspace '{}' deleted", ws_name);
     }
@@ -482,6 +487,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         return Ok(Vec::new());
     }
 
+    let mut agent_summaries = agent::read_agent_summaries(&rd);
+
     let main_ws_name = deps.backend.main_workspace_name();
     let vcs_workspaces = deps.backend.workspace_list(&main_repo).unwrap_or_default();
 
@@ -519,6 +526,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         repo_name: None,
         main_repo_path: main_repo.clone(),
         vcs_type,
+        agent_status: agent_summaries.remove(main_ws_name),
     });
 
     // Scan workspace dirs
@@ -562,6 +570,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
                 MergeStatus::Unmerged
             };
 
+        let agent_status = agent_summaries.remove(&name);
         entries.push(WorkspaceEntry {
             is_stale: compute_is_stale(merge_status, modified),
             repo_name: None,
@@ -575,6 +584,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             bookmarks: info.bookmarks,
             main_repo_path: main_repo.clone(),
             vcs_type,
+            agent_status,
         });
     }
 
@@ -599,6 +609,7 @@ pub struct WorkspaceEntry {
     pub repo_name: Option<String>,
     pub main_repo_path: PathBuf,
     pub vcs_type: vcs::VcsType,
+    pub agent_status: Option<agent::AgentSummary>,
 }
 
 /// Determine whether a non-main workspace should be shown as stale.
@@ -1819,6 +1830,7 @@ mod tests {
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
+                agent_status: None,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -1833,6 +1845,7 @@ mod tests {
                 repo_name: None,
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
+                agent_status: None,
             },
         ];
         // Should not panic; output goes to stderr
