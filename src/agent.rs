@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -328,20 +329,51 @@ fn dwm_hook_config() -> serde_json::Value {
     })
 }
 
+fn display_path(path: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+/// Check if dwm hooks are already installed in the given settings.
+fn hooks_already_installed(settings: &serde_json::Value) -> bool {
+    let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    let dwm_hooks = dwm_hook_config();
+    for event_name in dwm_hooks.as_object().unwrap().keys() {
+        let Some(arr) = hooks.get(event_name).and_then(|v| v.as_array()) else {
+            return false;
+        };
+        let has_dwm = arr.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c == "dwm hook-handler")
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if !has_dwm {
+            return false;
+        }
+    }
+    true
+}
+
 /// Install dwm hook configuration into ~/.claude/settings.json.
 pub fn setup_agent_hooks() -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");
-
-    eprintln!("dwm agent-setup");
-    eprintln!();
-    eprintln!(
-        "This will add Claude Code hooks to {} so that dwm",
-        settings_path.display()
-    );
-    eprintln!("can track agent status across workspaces.");
-    eprintln!();
+    let display = display_path(&settings_path);
 
     // Read existing settings or start fresh
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -352,6 +384,28 @@ pub fn setup_agent_hooks() -> Result<()> {
     } else {
         serde_json::json!({})
     };
+
+    // Check if already installed
+    if hooks_already_installed(&settings) {
+        eprintln!("  {} Already installed in {}", "✓".green(), display.dimmed());
+        return Ok(());
+    }
+
+    // Prompt the user for permission
+    eprint!("  {} Add Claude Code hooks to {}? [y/N] ", "?".bold().cyan(), display.bold());
+    let tty = std::fs::File::open("/dev/tty");
+    let response = match tty {
+        Ok(f) => {
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(f), &mut line)?;
+            line
+        }
+        Err(_) => String::new(),
+    };
+
+    if !response.trim().eq_ignore_ascii_case("y") {
+        return Ok(());
+    }
 
     let dwm_hooks = dwm_hook_config();
 
@@ -398,9 +452,7 @@ pub fn setup_agent_hooks() -> Result<()> {
     let json = serde_json::to_string_pretty(&settings)?;
     fs::write(&settings_path, json)?;
 
-    eprintln!("hooks installed to {}", settings_path.display());
-    eprintln!();
-    eprintln!("dwm will now show agent status in the workspace list.");
+    eprintln!("  {} Hooks installed to {}", "✓".green(), display.dimmed());
 
     Ok(())
 }
@@ -808,6 +860,14 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::AgentSetup)));
     }
 
+    #[test]
+    fn cli_setup_parses() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["dwm", "setup"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Setup)));
+    }
+
     // --- Gap: resolve_workspace_from_cwd with jj VcsType ---
 
     #[test]
@@ -966,6 +1026,48 @@ mod tests {
         assert!(obj.contains_key("UserPromptSubmit"));
         assert!(obj.contains_key("SessionEnd"));
         assert_eq!(obj.len(), 5);
+    }
+
+    #[test]
+    fn hooks_already_installed_detects_presence() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ],
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ],
+                "Notification": [
+                    { "matcher": "idle_prompt|permission_prompt", "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ],
+                "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ],
+                "SessionEnd": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ]
+            }
+        });
+        assert!(hooks_already_installed(&settings));
+    }
+
+    #[test]
+    fn hooks_already_installed_false_when_missing() {
+        let settings = serde_json::json!({});
+        assert!(!hooks_already_installed(&settings));
+    }
+
+    #[test]
+    fn hooks_already_installed_false_when_partial() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "dwm hook-handler" }] }
+                ]
+            }
+        });
+        assert!(!hooks_already_installed(&settings));
     }
 
     #[test]

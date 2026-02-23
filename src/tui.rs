@@ -8,29 +8,61 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::agent::AgentSummary;
 use crate::workspace::{WorkspaceEntry, format_time_ago};
 
+/// Shared stop signal that can wake sleeping threads immediately.
+struct StopSignal {
+    flag: AtomicBool,
+    condvar: Condvar,
+    mutex: Mutex<()>,
+}
+
+impl StopSignal {
+    fn new() -> Self {
+        Self {
+            flag: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+        }
+    }
+
+    fn stop(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+        self.condvar.notify_all();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    /// Sleep for up to `duration`, but wake immediately if stopped.
+    fn sleep(&self, duration: std::time::Duration) {
+        let guard = self.mutex.lock().unwrap();
+        let _ = self.condvar.wait_timeout(guard, duration);
+    }
+}
+
 /// Spawn a background thread that periodically calls `produce` and posts
-/// results to `sender`. The thread sleeps for `interval` between calls and
-/// checks `stop` before each iteration.
+/// results to `sender`. Polls immediately on start, then sleeps for `interval`
+/// between calls. Wakes instantly when the stop signal fires.
 fn spawn_refresh_thread<T: Send + 'static>(
     interval: std::time::Duration,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
     sender: Arc<Mutex<Option<T>>>,
     mut produce: impl FnMut() -> Option<T> + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(interval);
-            if stop.load(Ordering::Relaxed) {
+        loop {
+            if stop.is_stopped() {
                 break;
             }
             if let Some(value) = produce() {
                 let _ = sender.lock().map(|mut m| *m = Some(value));
             }
+            stop.sleep(interval);
         }
     })
 }
@@ -817,7 +849,7 @@ pub fn run_picker(
     mut list_entries: impl FnMut() -> Result<Vec<WorkspaceEntry>>,
 ) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
-        eprintln!("no workspaces found");
+        eprintln!("{}", "no workspaces found".red());
         return Ok(None);
     }
 
@@ -829,7 +861,7 @@ pub fn run_picker(
 
     // Set up background refresh threads
     let app = App::new(entries);
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopSignal::new());
 
     let agent_sender = app.agent_refresh_mailbox.sender();
     let refresh_sender = app.refresh_mailbox.sender();
@@ -865,8 +897,8 @@ pub fn run_picker(
         &mut list_entries,
     );
 
-    // Signal background threads to stop
-    stop.store(true, Ordering::Relaxed);
+    // Signal background threads to stop (wakes them immediately)
+    stop.stop();
     let _ = agent_thread.join();
     let _ = refresh_thread.join();
 
@@ -1311,7 +1343,7 @@ fn run_picker_multi_repo_inner<B: Backend>(
 /// Returns the selected workspace path, or `None` if the user cancelled.
 pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<PickerResult>> {
     if entries.is_empty() {
-        eprintln!("no workspaces found");
+        eprintln!("{}", "no workspaces found".red());
         return Ok(None);
     }
 
@@ -1322,7 +1354,7 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let mut terminal = Terminal::new(backend)?;
 
     let app = MultiRepoApp::new(entries);
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopSignal::new());
 
     let agent_sender = app.agent_refresh_mailbox.sender();
     let refresh_sender = app.refresh_mailbox.sender();
@@ -1376,7 +1408,7 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
         }
     });
 
-    stop.store(true, Ordering::Relaxed);
+    stop.stop();
     let _ = agent_thread.join();
     let _ = refresh_thread.join();
 
@@ -2359,7 +2391,7 @@ mod tests {
 
     #[test]
     fn refresh_thread_posts_to_mailbox() {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopSignal::new());
         let sender = Arc::new(Mutex::new(None::<Vec<String>>));
         let sender_clone = Arc::clone(&sender);
 
@@ -2377,7 +2409,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(200));
-        stop.store(true, Ordering::Relaxed);
+        stop.stop();
         handle.join().unwrap();
 
         // Should have posted at least once
@@ -2391,7 +2423,7 @@ mod tests {
 
     #[test]
     fn refresh_thread_stops_on_flag() {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopSignal::new());
         let sender = Arc::new(Mutex::new(None::<u32>));
 
         let handle = spawn_refresh_thread(
@@ -2401,15 +2433,15 @@ mod tests {
             || Some(42),
         );
 
-        // Stop immediately
-        stop.store(true, Ordering::Relaxed);
+        // Stop immediately — condvar should wake the thread instantly
+        stop.stop();
         let start = std::time::Instant::now();
         handle.join().unwrap();
         let elapsed = start.elapsed();
 
-        // Thread should exit within ~600ms (one sleep interval + margin)
+        // Thread should exit nearly instantly (not wait for the 500ms sleep)
         assert!(
-            elapsed < Duration::from_millis(800),
+            elapsed < Duration::from_millis(100),
             "thread took too long to stop: {:?}",
             elapsed
         );
@@ -2417,7 +2449,7 @@ mod tests {
 
     #[test]
     fn agent_thread_posts_summaries() {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopSignal::new());
         let sender = Arc::new(Mutex::new(None::<HashMap<String, AgentSummary>>));
         let sender_clone = Arc::clone(&sender);
 
@@ -2440,7 +2472,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(150));
-        stop.store(true, Ordering::Relaxed);
+        stop.stop();
         handle.join().unwrap();
 
         let data = sender.lock().unwrap().take();

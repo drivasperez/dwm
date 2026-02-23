@@ -49,10 +49,14 @@ pub enum Commands {
     #[command(name = "hook-handler", hide = true)]
     HookHandler,
     /// Set up Claude Code hooks for agent status tracking
+    #[command(name = "agent-setup", hide = true)]
     AgentSetup,
+    /// Run interactive setup for shell integration and agent hooks
+    Setup,
     /// Print the current version
     Version,
     /// Print shell integration wrapper
+    #[command(name = "shell-setup", hide = true)]
     ShellSetup {
         /// Emit POSIX (bash/zsh) wrapper
         #[arg(long, group = "shell_type")]
