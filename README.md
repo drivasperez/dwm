@@ -137,6 +137,27 @@ This installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code
 
 Status is tracked per session, so multiple agents in the same workspace are counted independently.
 
+## Zellij integration
+
+When dwm runs inside a [zellij](https://zellij.dev/) session (i.e. `$ZELLIJ` is set), it cooperates with the multiplexer for one-tab-per-workspace workflows:
+
+- **`dwm new`** opens a new zellij tab named after the workspace (`zellij action new-tab --cwd <ws> --name <name>`) instead of `cd`-ing your current pane. The new tab IS your new context, so the original shell is left alone.
+- **`dwm switch <name>`** focuses an existing tab named `<name>` (`zellij action go-to-tab-name <name>`). If no such tab exists, dwm spawns a new one. dwm also tries the decorated forms `<name> ▶`, `<name> ●`, `<name> ✓` so a running agent's tab name is still discoverable.
+- **Agent status glyphs** — when the Claude Code hook handler fires, it renames the current zellij tab to `<name> <glyph>`:
+
+  | Glyph  | Meaning                                      |
+  | ------ | -------------------------------------------- |
+  | `▶`    | running — agent is actively producing tokens |
+  | `●`    | waiting on user input or permission          |
+  | `✓`    | idle / done                                  |
+  | _none_ | stale or no agent activity                   |
+
+  When several agents share a workspace, the most attention-needing state wins (waiting > working > idle).
+
+Every zellij interaction is best-effort — if `zellij` isn't on `$PATH` or the action fails, dwm falls through to its non-zellij behaviour and prints a warning to stderr.
+
+**To disable:** unset `$ZELLIJ` before running dwm (e.g. `env -u ZELLIJ dwm new`).
+
 ## Build
 
 ```sh
