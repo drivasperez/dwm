@@ -10,6 +10,7 @@ mod shell;
 mod tui;
 mod vcs;
 mod workspace;
+mod zellij;
 
 use anyhow::Result;
 use clap::Parser;

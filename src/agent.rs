@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::vcs::VcsType;
 use crate::workspace;
+use crate::zellij;
 
 /// How long before a status file is considered stale and ignored.
 const STALE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -270,12 +271,15 @@ pub fn handle_hook() -> Result<()> {
         None => return Ok(()), // not a dwm workspace, silently ignore
     };
 
+    let mut status_changed = false;
     match event {
         "PreToolUse" | "UserPromptSubmit" => {
             write_agent_status(&repo_dir, session_id, &ws_name, AgentStatus::Working)?;
+            status_changed = true;
         }
         "Stop" => {
             write_agent_status(&repo_dir, session_id, &ws_name, AgentStatus::Idle)?;
+            status_changed = true;
         }
         "Notification" => {
             let notification_type = json
@@ -285,17 +289,40 @@ pub fn handle_hook() -> Result<()> {
             match notification_type {
                 "idle_prompt" | "permission_prompt" => {
                     write_agent_status(&repo_dir, session_id, &ws_name, AgentStatus::Waiting)?;
+                    status_changed = true;
                 }
                 _ => {} // ignore other notification types
             }
         }
         "SessionEnd" => {
             remove_agent_status(&repo_dir, session_id)?;
+            status_changed = true;
         }
         _ => {} // ignore unknown events
     }
 
+    // If the hook is firing inside a zellij session, decorate the active tab
+    // with a status glyph so the user can see which workspace needs
+    // attention from the tab bar alone. Best-effort: any failure is
+    // silently swallowed because this is a UX nicety, not a correctness
+    // requirement.
+    if status_changed && let Some(mux) = zellij::detect() {
+        update_zellij_tab_glyph(&mux, &repo_dir, &ws_name);
+    }
+
     Ok(())
+}
+
+/// Re-read the per-workspace agent summaries and rename the current zellij
+/// tab to `<ws_name> <glyph>` reflecting the most attention-needing state.
+///
+/// When a workspace has multiple concurrent agents, the glyph reflects the
+/// most urgent state ([`AgentSummary::most_urgent`]): waiting > working >
+/// idle. Empty / stale summaries clear the glyph so the tab name is bare.
+fn update_zellij_tab_glyph<M: zellij::Multiplexer>(mux: &M, repo_dir: &Path, ws_name: &str) {
+    let summaries = read_agent_summaries(repo_dir);
+    let glyph = summaries.get(ws_name).and_then(zellij::glyph_for_summary);
+    let _ = mux.set_tab_status(ws_name, glyph);
 }
 
 // ---------------------------------------------------------------------------
