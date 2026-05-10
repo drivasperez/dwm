@@ -494,7 +494,7 @@ pub fn run_workspace_command() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, ws_name, ws_path) = find_dwm_workspace(&cwd)
         .context("not inside a dwm workspace; cd into a workspace before running `dwm run`")?;
-    let backend = detect_backend_from_cwd(&cwd)?;
+    let backend = vcs::detect(&cwd)?;
 
     let loaded_hooks = hooks::load(&root)?;
     if loaded_hooks.run.is_none() {
@@ -2053,7 +2053,7 @@ mod tests {
     fn delete_runs_archive_hook_on_success() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/my-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         // Configure an archive hook that writes a marker file in the workspace.
@@ -2101,7 +2101,7 @@ mod tests {
         // there should NOT prompt — they should log and proceed.
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/my-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         fs::write(
@@ -2129,7 +2129,7 @@ mod tests {
         // No .dwm.toml at all — deletion should still work.
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/my-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);

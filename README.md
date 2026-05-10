@@ -58,35 +58,64 @@ dwm status              # non-interactive workspace summary
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
+dwm run                 # run scripts.run for the current workspace
 dwm setup               # interactive shell and agent setup
 dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
 
-## Setup hooks
+## Lifecycle hooks
 
-After `dwm new` creates a workspace, it can run a setup script (e.g. `npm install`, copy `.env`, …) so the workspace is immediately usable. Configure it via `.dwm.toml` at the repo root:
+dwm runs user-defined commands at three points in a workspace's life. Configure them via `.dwm.toml` at the repo root:
 
 ```toml
 [scripts]
-setup = "npm install && cp ../main/.env .env"
-# `run` and `archive` are reserved for future lifecycle hooks; parsed but not invoked yet
+setup = "npm install && cp ../main/.env .env"   # after `dwm new`
+run = "npm run dev"                              # via `dwm run`
+archive = "tar czf $DWM_WORKSPACE_NAME.tar.gz ." # before `dwm delete`
+
+# How `run` is executed (default: "concurrent"):
+#   concurrent     — spawn detached and return immediately (long-lived dev servers)
+#   nonconcurrent  — block until the script exits
+runScriptMode = "concurrent"
 ```
 
-If `.dwm.toml` is absent but a [Conductor](https://www.conductor.build/docs/reference/conductor-json) `conductor.json` exists at the repo root, dwm reads `scripts.setup` from it as a drop-in fallback. Conductor-specific fields like `runScriptMode` and `enterpriseDataPrivacy` are accepted and ignored, so an existing `conductor.json` works without edits.
+| Hook      | When it fires                             | Failure behaviour                                       |
+| --------- | ----------------------------------------- | ------------------------------------------------------- |
+| `setup`   | After `dwm new` provisions the workspace  | Logged; workspace is still created                      |
+| `run`     | On `dwm run` (manual)                     | Concurrent: returns once spawned. Nonconcurrent: logged |
+| `archive` | Before `dwm delete` removes the workspace | Verbose mode prompts; TUI deletion logs and proceeds    |
 
-The script runs as `sh -c "<command>"` with the new workspace as its working directory. Stdout and stderr from the script are forwarded to dwm's stderr (dwm's stdout is reserved for the path the shell wrapper `cd`s into). A non-zero exit prints a warning but doesn't unwind — the workspace is still created and you're still `cd`d into it.
+### Conductor compatibility
 
-The script sees these environment variables:
+If `.dwm.toml` is absent but a [Conductor](https://www.conductor.build/docs/reference/conductor-json) `conductor.json` exists at the repo root, dwm reads `scripts.{setup,run,archive}` and `runScriptMode` from it as a drop-in fallback. Other Conductor-specific fields (`enterpriseDataPrivacy`, etc.) are accepted and ignored, so an existing `conductor.json` works without edits.
 
-| Variable              | Value                                               |
-| --------------------- | --------------------------------------------------- |
-| `DWM_WORKSPACE_PATH`  | Absolute path of the new workspace                  |
-| `DWM_WORKSPACE_NAME`  | Workspace name                                      |
-| `DWM_REPO_ROOT`       | Absolute path of the original repo root             |
-| `DWM_VCS`             | `jj` or `git`                                       |
-| `DWM_FROM_WORKSPACE`  | The `--from <name>` value, if provided              |
-| `CONDUCTOR_ROOT_PATH` | Alias of `DWM_WORKSPACE_PATH`, for Conductor compat |
+> **Conductor users:** Drop your existing `conductor.json` into the repo and dwm will read it. All env vars in your setup / run / archive scripts work unchanged.
+
+### Execution
+
+Scripts run as `sh -c "<command>"` with the workspace as the working directory. Stdout and stderr are forwarded to dwm's stderr (dwm's stdout is reserved for the shell-wrapper `cd` target). Concurrent `run` scripts inherit dwm's stdio so output appears in your terminal; closing that terminal will kill the script.
+
+### Environment variables
+
+Every hook (setup / run / archive) sees:
+
+| Variable                   | Value                                                        |
+| -------------------------- | ------------------------------------------------------------ |
+| `DWM_WORKSPACE_PATH`       | Absolute path of the workspace                               |
+| `DWM_WORKSPACE_NAME`       | Workspace name                                               |
+| `DWM_REPO_ROOT`            | Absolute path of the original repository root                |
+| `DWM_VCS`                  | `jj` or `git`                                                |
+| `DWM_FROM_WORKSPACE`       | The `--from <name>` value, if provided (setup only)          |
+| `CONDUCTOR_WORKSPACE_NAME` | Same as `DWM_WORKSPACE_NAME`                                 |
+| `CONDUCTOR_WORKSPACE_PATH` | Same as `DWM_WORKSPACE_PATH`                                 |
+| `CONDUCTOR_ROOT_PATH`      | Same as `DWM_REPO_ROOT` (the source repo, NOT the workspace) |
+| `CONDUCTOR_DEFAULT_BRANCH` | Detected default branch (e.g. `main`, `master`)              |
+| `CONDUCTOR_PORT`           | First port of a 10-port range allocated to this workspace    |
+
+### Port allocation
+
+`CONDUCTOR_PORT` gives each workspace a stable, unique 10-port slot starting from 3000. Allocations are persisted to `<repo>/.dwm/<name>/.dwm-port` so they survive restarts. New workspaces fill holes left by deleted ones (e.g. with 3000 and 3020 occupied, the next workspace gets 3010).
 
 ## Agent status tracking
 
