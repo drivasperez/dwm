@@ -213,6 +213,10 @@ impl VcsBackend for GitBackend {
         vcs::VcsType::Git.main_workspace_name()
     }
 
+    fn default_branch_name(&self, repo_root: &Path) -> String {
+        detect_trunk(repo_root)
+    }
+
     fn preview_log(
         &self,
         _repo_dir: &Path,
