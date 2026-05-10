@@ -349,6 +349,7 @@ fn new_workspace_inner(
         repo_root: root.clone(),
         vcs_type: deps.backend.vcs_type(),
         from_workspace: from.map(|s| s.to_string()),
+        default_branch: deps.backend.default_branch_name(&root),
     };
     hooks::run_setup(&loaded_hooks, &hook_ctx)?;
 

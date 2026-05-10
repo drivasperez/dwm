@@ -5,6 +5,7 @@ mod hooks;
 #[allow(dead_code)]
 mod jj;
 mod names;
+mod ports;
 mod shell;
 mod tui;
 mod vcs;
