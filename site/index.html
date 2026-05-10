@@ -238,8 +238,14 @@
       </p>
       <p>
         dwm (pronounced "doom") creates, lists, and deletes workspaces stored under
-        <code>~/.dwm/&lt;repo&gt;/</code>, with a shell wrapper that auto-<code>cd</code>s into the
-        selected workspace. It works with both jj and git repositories.
+        <code>&lt;repo&gt;/.dwm/&lt;name&gt;/</code>, with a shell wrapper that
+        auto-<code>cd</code>s into the selected workspace. It works with both jj and git
+        repositories.
+      </p>
+      <p>
+        The first time you create a workspace in a repo, dwm adds <code>.dwm/</code> to your ignore
+        rules &mdash; <code>.git/info/exclude</code> for git repos, <code>.gitignore</code> for
+        jj-only repos &mdash; so workspace directories never end up tracked.
       </p>
       <p>
         It provides an interactive TUI picker for browsing and switching between workspaces, with
@@ -285,8 +291,8 @@
       <h2>SHELL SETUP</h2>
       <p>
         `dwm` needs to add a small snippet to your shell config in order to be able to switch
-        directories for you. Run <code>dwm setup</code> interactively and it will offer
-        to add the wrapper to your shell config and set up agent hooks automatically:
+        directories for you. Run <code>dwm setup</code> interactively and it will offer to add the
+        wrapper to your shell config and set up agent hooks automatically:
       </p>
       <pre data-copyable="true"><code>dwm setup</code></pre>
       <p>Or add it manually:</p>
@@ -303,13 +309,14 @@
     <div class="section">
       <h2>AGENT STATUS TRACKING</h2>
       <p>
-        dwm can show the status of <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> agents running in your workspaces. The TUI's "Agent" column displays per-workspace counts like <code>2 waiting, 1 working</code>.
+        dwm can show the status of
+        <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> agents running in
+        your workspaces. The TUI's "Agent" column displays per-workspace counts like
+        <code>2 waiting, 1 working</code>.
       </p>
       <p>To set it up, run:</p>
       <pre data-copyable="true"><code>dwm setup</code></pre>
-      <p>
-        This installs Claude Code hooks that report agent status to dwm.
-      </p>
+      <p>This installs Claude Code hooks that report agent status to dwm.</p>
     </div>
 
     <div class="section">

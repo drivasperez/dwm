@@ -2,7 +2,9 @@
 
 A TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS) and [git](https://git-scm.com/).
 
-dwm creates, lists, and deletes workspaces stored under `~/.dwm/<repo>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
+dwm creates, lists, and deletes workspaces stored under `<repo>/.dwm/<name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
+
+The first time you create a workspace in a repo, dwm adds `.dwm/` to your ignore rules — `.git/info/exclude` for git repos, `.gitignore` for jj-only repos — so the workspace dirs never end up tracked.
 
 ## Install
 
@@ -74,6 +76,7 @@ dwm setup
 This installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) into `~/.claude/settings.json` that report agent status to dwm via the `dwm hook-handler` command.
 
 **Statuses:**
+
 - **waiting** (yellow) — agent needs user input or permission approval
 - **working** (green) — agent is actively executing
 - **idle** (gray) — agent finished its turn, waiting for the next prompt
