@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{agent, names, vcs};
+use crate::{agent, hooks, names, vcs};
 
 /// Whether a workspace's changes have been merged into trunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +276,11 @@ fn new_workspace_inner(
         );
     }
 
+    // Load post-creation hooks before doing any VCS work so a malformed
+    // .dwm.toml / conductor.json is reported up-front rather than after we've
+    // already provisioned the workspace.
+    let loaded_hooks = hooks::load(&root)?;
+
     eprintln!("{} workspace '{}'...", "creating".cyan(), ws_name.bold());
     deps.backend.workspace_add(&root, &ws_path, &ws_name, at)?;
     eprintln!(
@@ -284,6 +289,15 @@ fn new_workspace_inner(
         ws_name.bold(),
         ws_path.display().dimmed()
     );
+
+    let hook_ctx = hooks::HookContext {
+        workspace_path: ws_path.clone(),
+        workspace_name: ws_name.clone(),
+        repo_root: root.clone(),
+        vcs_type: deps.backend.vcs_type(),
+        from_workspace: from.map(|s| s.to_string()),
+    };
+    hooks::run_setup(&loaded_hooks, &hook_ctx)?;
 
     // stdout: path for shell wrapper to cd into
     println!("{}", ws_path.display());

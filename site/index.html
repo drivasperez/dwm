@@ -307,6 +307,48 @@
     </div>
 
     <div class="section">
+      <h2>SETUP HOOKS</h2>
+      <p>
+        After <code>dwm new</code> creates a workspace, it can run a setup script (e.g.
+        <code>npm install</code>, copy <code>.env</code>, …) so the workspace is immediately usable.
+        Configure it via <code>.dwm.toml</code> at the repo root:
+      </p>
+      <pre data-copyable="true"><code>[scripts]
+setup = "npm install &amp;&amp; cp ../main/.env .env"
+# `run` and `archive` are reserved for future lifecycle hooks; parsed but not invoked yet</code></pre>
+      <p>
+        If <code>.dwm.toml</code> is absent but a
+        <a href="https://www.conductor.build/docs/reference/conductor-json">Conductor</a>
+        <code>conductor.json</code> exists at the repo root, dwm reads
+        <code>scripts.setup</code> from it as a drop-in fallback. Conductor-specific fields like
+        <code>runScriptMode</code> and <code>enterpriseDataPrivacy</code> are accepted and ignored,
+        so an existing <code>conductor.json</code> works without edits.
+      </p>
+      <p>
+        The script runs as <code>sh -c "&lt;command&gt;"</code> with the new workspace as its
+        working directory. Stdout and stderr from the script are forwarded to dwm's stderr (dwm's
+        stdout is reserved for the path the shell wrapper <code>cd</code>s into). A non-zero exit
+        prints a warning but doesn't unwind — the workspace is still created and you're still
+        <code>cd</code>d into it.
+      </p>
+      <p>The script sees these environment variables:</p>
+      <dl>
+        <dt>DWM_WORKSPACE_PATH</dt>
+        <dd>Absolute path of the new workspace</dd>
+        <dt>DWM_WORKSPACE_NAME</dt>
+        <dd>Workspace name</dd>
+        <dt>DWM_REPO_ROOT</dt>
+        <dd>Absolute path of the original repo root</dd>
+        <dt>DWM_VCS</dt>
+        <dd><code>jj</code> or <code>git</code></dd>
+        <dt>DWM_FROM_WORKSPACE</dt>
+        <dd>The <code>--from &lt;name&gt;</code> value, if provided</dd>
+        <dt>CONDUCTOR_ROOT_PATH</dt>
+        <dd>Alias of <code>DWM_WORKSPACE_PATH</code>, for Conductor compat</dd>
+      </dl>
+    </div>
+
+    <div class="section">
       <h2>AGENT STATUS TRACKING</h2>
       <p>
         dwm can show the status of
