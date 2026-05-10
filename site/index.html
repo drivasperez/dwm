@@ -362,6 +362,46 @@ setup = "npm install &amp;&amp; cp ../main/.env .env"
     </div>
 
     <div class="section">
+      <h2>ZELLIJ INTEGRATION</h2>
+      <p>
+        When dwm runs inside a <a href="https://zellij.dev/">zellij</a> session (i.e.
+        <code>$ZELLIJ</code> is set), it cooperates with the multiplexer for one-tab-per-workspace
+        workflows:
+      </p>
+      <ul>
+        <li>
+          <code>dwm new</code> opens a new zellij tab named after the workspace (<code
+            >zellij action new-tab --cwd &lt;ws&gt; --name &lt;name&gt;</code
+          >) instead of <code>cd</code>-ing your current pane. The new tab IS your new context.
+        </li>
+        <li>
+          <code>dwm switch &lt;name&gt;</code> focuses an existing tab named
+          <code>&lt;name&gt;</code> (<code>zellij action go-to-tab-name &lt;name&gt;</code>),
+          falling back to spawning a new tab when none exists. dwm also tries the glyph-decorated
+          forms <code>&lt;name&gt; ▶</code>, <code>&lt;name&gt; ●</code>,
+          <code>&lt;name&gt; ✓</code> so a running agent's tab is still discoverable.
+        </li>
+        <li>
+          <strong>Agent status glyphs</strong> — when the Claude Code hook handler fires, it renames
+          the current zellij tab to <code>&lt;name&gt; &lt;glyph&gt;</code>:
+          <ul>
+            <li><code>▶</code> running — an agent is actively producing tokens</li>
+            <li><code>●</code> waiting on user input or permission</li>
+            <li><code>✓</code> idle / done</li>
+            <li><em>no glyph</em> — stale or no agent activity</li>
+          </ul>
+          When several agents share a workspace, the most attention-needing state wins (waiting &gt;
+          working &gt; idle).
+        </li>
+      </ul>
+      <p>
+        Every zellij interaction is best-effort — if <code>zellij</code> isn't on
+        <code>$PATH</code> or the action fails, dwm falls through to its non-zellij behaviour. To
+        disable, unset <code>$ZELLIJ</code> before running dwm.
+      </p>
+    </div>
+
+    <div class="section">
       <h2>USAGE</h2>
       <dl>
         <dt>dwm new [name]</dt>
