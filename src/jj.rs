@@ -161,11 +161,6 @@ impl VcsBackend for JjBackend {
         root_from(dir)
     }
 
-    fn repo_name_from(&self, dir: &Path) -> Result<String> {
-        let root = self.root_from(dir)?;
-        Ok(crate::vcs::repo_dir_name(&root))
-    }
-
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>> {
         let out = run_jj_in(
             repo_dir,

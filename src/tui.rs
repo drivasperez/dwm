@@ -1359,16 +1359,21 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let agent_sender = app.agent_refresh_mailbox.sender();
     let refresh_sender = app.refresh_mailbox.sender();
 
-    // Collect unique repo dirs for agent polling
-    let repo_dirs: Vec<PathBuf> = {
-        let mut dirs = std::collections::HashSet::new();
+    // Collect unique (repo_name, agent_dir) pairs for agent polling.
+    // Agent statuses live in <repo_root>/.dwm/.agent-status, so we read from
+    // <main_repo_path>/.dwm/ for each repo represented in the entry list.
+    let repo_dirs: Vec<(String, PathBuf)> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
         for entry in &app.entries {
             if let Some(repo_name) = &entry.repo_name {
-                let home = dirs::home_dir().unwrap_or_default();
-                dirs.insert(home.join(".dwm").join(repo_name));
+                let agent_dir = entry.main_repo_path.join(".dwm");
+                if seen.insert(agent_dir.clone()) {
+                    out.push((repo_name.clone(), agent_dir));
+                }
             }
         }
-        dirs.into_iter().collect()
+        out
     };
 
     // Agent status polling thread (~2s)
@@ -1378,13 +1383,8 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
         agent_sender,
         move || {
             let mut all_summaries = HashMap::new();
-            for repo_dir in &repo_dirs {
-                let repo_name = repo_dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                for (ws_name, summary) in crate::agent::read_agent_summaries(repo_dir) {
+            for (repo_name, agent_dir) in &repo_dirs {
+                for (ws_name, summary) in crate::agent::read_agent_summaries(agent_dir) {
                     all_summaries.insert(format!("{}:{}", repo_name, ws_name), summary);
                 }
             }

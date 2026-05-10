@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -59,40 +59,10 @@ pub struct DiffStat {
     pub deletions: u32,
 }
 
-/// Compute a short FNV-1a hex hash of a path string, used to disambiguate
-/// repos that share the same directory basename.
-fn hash_path(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    let mut h: u32 = 2166136261; // FNV-1a offset basis
-    for b in s.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16777619); // FNV prime
-    }
-    format!("{:08x}", h)
-}
-
-/// Build the `~/.dwm/` sub-directory name for a repo.
-///
-/// The name is `<basename>-<8-char-hash>` so that two repos with the same
-/// directory name but different paths get distinct dwm directories.
-pub fn repo_dir_name(root: &Path) -> String {
-    let name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    format!("{}-{}", name, hash_path(root))
-}
-
 /// Abstraction over jj and git that workspace operations are delegated to.
 pub trait VcsBackend {
     /// Return the repository root given any directory inside the repo.
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
-
-    /// Return the dwm directory name for the repo that contains `dir`.
-    fn repo_name_from(&self, dir: &Path) -> Result<String> {
-        let root = self.root_from(dir)?;
-        Ok(repo_dir_name(&root))
-    }
 
     /// List all workspaces/worktrees known to the VCS, returning `(name, info)` pairs.
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>>;
@@ -171,29 +141,6 @@ pub fn detect(dir: &Path) -> Result<Box<dyn VcsBackend>> {
         "no jj or git repository found in {} or any parent directory",
         dir.display()
     )
-}
-
-/// Detect VCS from a dwm repo directory by reading the `.vcs-type` file.
-/// Defaults to jj for backward compatibility if the file doesn't exist.
-pub fn detect_from_dwm_dir(repo_dir: &Path) -> Result<Box<dyn VcsBackend>> {
-    let vcs_type = read_vcs_type(repo_dir)?;
-    Ok(vcs_type.to_backend())
-}
-
-/// Read the VcsType from a dwm repo directory's `.vcs-type` file.
-/// Defaults to Jj for backward compatibility if the file doesn't exist.
-pub fn read_vcs_type(repo_dir: &Path) -> Result<VcsType> {
-    let vcs_file = repo_dir.join(".vcs-type");
-    if vcs_file.exists() {
-        let content = std::fs::read_to_string(&vcs_file)
-            .with_context(|| format!("could not read {}", vcs_file.display()))?;
-        content
-            .trim()
-            .parse::<VcsType>()
-            .with_context(|| format!("in {}", vcs_file.display()))
-    } else {
-        Ok(VcsType::Jj)
-    }
 }
 
 /// Parse the full output of `jj diff --stat` or `git diff --stat`, extracting
@@ -331,26 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn repo_dir_name_same_path_is_stable() {
-        let path = std::path::Path::new("/home/user/projects/myrepo");
-        assert_eq!(repo_dir_name(path), repo_dir_name(path));
-    }
-
-    #[test]
-    fn repo_dir_name_starts_with_basename() {
-        let path = std::path::Path::new("/home/user/myrepo");
-        let dir_name = repo_dir_name(path);
-        assert!(dir_name.starts_with("myrepo-"), "dir_name: {}", dir_name);
-    }
-
-    #[test]
-    fn repo_dir_name_differs_for_same_basename_different_paths() {
-        let path_a = std::path::Path::new("/work/a/myrepo");
-        let path_b = std::path::Path::new("/work/b/myrepo");
-        assert_ne!(repo_dir_name(path_a), repo_dir_name(path_b));
-    }
-
-    #[test]
     fn detect_jj_priority_over_git() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".jj")).unwrap();
@@ -379,35 +306,5 @@ mod tests {
     fn detect_no_vcs() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect(dir.path()).is_err());
-    }
-
-    #[test]
-    fn detect_from_dwm_dir_defaults_to_jj() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_type(), VcsType::Jj);
-    }
-
-    #[test]
-    fn detect_from_dwm_dir_reads_git() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".vcs-type"), "git").unwrap();
-        let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_type(), VcsType::Git);
-    }
-
-    #[test]
-    fn detect_from_dwm_dir_reads_jj() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".vcs-type"), "jj").unwrap();
-        let backend = detect_from_dwm_dir(dir.path()).unwrap();
-        assert_eq!(backend.vcs_type(), VcsType::Jj);
-    }
-
-    #[test]
-    fn detect_from_dwm_dir_unknown_type() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".vcs-type"), "svn").unwrap();
-        assert!(detect_from_dwm_dir(dir.path()).is_err());
     }
 }
