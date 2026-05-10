@@ -398,6 +398,45 @@ fn delete_workspace_inner(
         bail!("workspace '{}' not found at {}", ws_name, ws_path.display());
     }
 
+    // Pre-delete archive hook (Conductor compat).
+    //
+    // We run the archive script before tearing the workspace down. On failure
+    // we prompt the user (verbose path only) since the alternative is silently
+    // losing whatever the archive script was meant to preserve.
+    //
+    // The TUI delete path uses `DeleteOutput::Quiet` because the alternate
+    // screen makes prompting awkward — there, a failed archive script is
+    // logged after the TUI exits but does NOT abort deletion. This is option
+    // (a) from the design discussion: simpler, and TUI deletion is generally
+    // a user gesture they've already committed to.
+    let loaded_hooks = hooks::load(&root).unwrap_or_default();
+    if loaded_hooks.archive.is_some() {
+        let hook_ctx = hooks::HookContext {
+            workspace_path: ws_path.clone(),
+            workspace_name: ws_name.clone(),
+            repo_root: root.clone(),
+            vcs_type: deps.backend.vcs_type(),
+            from_workspace: None,
+            default_branch: deps.backend.default_branch_name(&root),
+        };
+        let archive_ok = hooks::run_archive_script(&loaded_hooks, &hook_ctx).unwrap_or(false);
+        if !archive_ok {
+            if verbose {
+                if !confirm_delete_after_failed_archive()? {
+                    bail!("archive script failed; aborting delete (re-run to confirm)");
+                }
+            } else {
+                // Quiet (TUI) path: queue a warning to be printed by the
+                // caller after the alternate screen tears down. We can only
+                // emit to stderr; ratatui restores stderr on exit.
+                eprintln!(
+                    "warning: archive script for workspace '{}' returned non-zero; deletion proceeding anyway",
+                    ws_name
+                );
+            }
+        }
+    }
+
     if verbose {
         eprintln!(
             "{} workspace '{}'...",
@@ -426,6 +465,51 @@ fn delete_workspace_inner(
     } else {
         Ok(None)
     }
+}
+
+/// Prompt the user (on stderr / `/dev/tty`) whether to proceed with deletion
+/// after the archive script returned non-zero. Returns `true` on `y`/`Y`,
+/// `false` otherwise. If we cannot read from a tty, we abort (return an
+/// error) so the user is never tricked into deleting under ambiguous input.
+fn confirm_delete_after_failed_archive() -> Result<bool> {
+    eprint!("archive script failed; delete workspace anyway? [y/N] ");
+    use std::io::{BufRead, Write};
+    let _ = std::io::stderr().flush();
+    let tty = std::fs::File::open("/dev/tty");
+    match tty {
+        Ok(f) => {
+            let mut line = String::new();
+            std::io::BufReader::new(f).read_line(&mut line)?;
+            Ok(line.trim().eq_ignore_ascii_case("y"))
+        }
+        Err(_) => bail!("archive script failed and stdin is not a tty; aborting deletion"),
+    }
+}
+
+/// Implementation of the `dwm run` subcommand: invoke `scripts.run` for the
+/// workspace dwm thinks the user is "in" right now. Determined from cwd via
+/// [`find_dwm_workspace`] — if cwd is at the repo root we don't have a
+/// workspace context and abort.
+pub fn run_workspace_command() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let (root, ws_name, ws_path) = find_dwm_workspace(&cwd)
+        .context("not inside a dwm workspace; cd into a workspace before running `dwm run`")?;
+    let backend = detect_backend_from_cwd(&cwd)?;
+
+    let loaded_hooks = hooks::load(&root)?;
+    if loaded_hooks.run.is_none() {
+        bail!("no `scripts.run` defined in .dwm.toml or conductor.json");
+    }
+
+    let hook_ctx = hooks::HookContext {
+        workspace_path: ws_path,
+        workspace_name: ws_name,
+        repo_root: root.clone(),
+        vcs_type: backend.vcs_type(),
+        from_workspace: None,
+        default_branch: backend.default_branch_name(&root),
+    };
+    hooks::run_run_script(&loaded_hooks, &hook_ctx)
 }
 
 /// Switch to the named workspace by printing its path to stdout for the shell
@@ -1961,6 +2045,101 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    // ── archive hook (pre-delete) tests ───────────────────────────────
+
+    #[test]
+    fn delete_runs_archive_hook_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        let ws_dir = main_repo.join(".dwm/my-ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        // Configure an archive hook that writes a marker file in the workspace.
+        let marker = ws_dir.join("archive-marker");
+        fs::write(
+            main_repo.join(".dwm.toml"),
+            format!(
+                "[scripts]\narchive = \"echo ran > '{}'\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+
+        // Pre-condition: the marker file is captured during the hook BEFORE
+        // the workspace dir is removed; we copy it to a stable location too.
+        // Easier: write to a location outside the workspace so we can inspect
+        // it after the workspace dir is gone.
+        let outside_marker = tmp.path().join("archive-marker.outside");
+        fs::write(
+            main_repo.join(".dwm.toml"),
+            format!(
+                "[scripts]\narchive = \"echo ran > '{}'\"\n",
+                outside_marker.display()
+            ),
+        )
+        .unwrap();
+
+        delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose).unwrap();
+        assert!(
+            outside_marker.exists(),
+            "archive hook should have run before delete"
+        );
+        assert!(!ws_dir.exists(), "workspace should be deleted");
+    }
+
+    #[test]
+    fn delete_quiet_path_does_not_abort_on_archive_failure() {
+        // The TUI uses DeleteOutput::Quiet; per the design, archive failures
+        // there should NOT prompt — they should log and proceed.
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        let ws_dir = main_repo.join(".dwm/my-ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        fs::write(
+            main_repo.join(".dwm.toml"),
+            "[scripts]\narchive = \"exit 9\"\n",
+        )
+        .unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+
+        // Should succeed, not abort; workspace gets deleted regardless.
+        delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Quiet).unwrap();
+        assert!(
+            !ws_dir.exists(),
+            "workspace should be deleted in quiet mode"
+        );
+    }
+
+    #[test]
+    fn delete_with_no_archive_hook_succeeds() {
+        // No .dwm.toml at all — deletion should still work.
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        let ws_dir = main_repo.join(".dwm/my-ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+
+        delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose).unwrap();
+        assert!(!ws_dir.exists());
     }
 
     // ── rename_workspace_inner tests ──────────────────────────────

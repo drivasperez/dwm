@@ -45,6 +45,8 @@ pub enum Commands {
         /// Workspace name to delete
         name: Option<String>,
     },
+    /// Run the project's `scripts.run` command (Conductor compat)
+    Run,
     /// Process a Claude Code hook event (used internally by hooks)
     #[command(name = "hook-handler", hide = true)]
     HookHandler,
@@ -246,5 +248,19 @@ mod tests {
     fn unknown_subcommand_errors() {
         let err = Cli::try_parse_from(["dwm", "bogus"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn run_subcommand_parses() {
+        let cli = Cli::try_parse_from(["dwm", "run"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Run)));
+    }
+
+    #[test]
+    fn run_subcommand_takes_no_args() {
+        // Extra args should be rejected so users don't accidentally think
+        // `dwm run npm test` overrides scripts.run.
+        let err = Cli::try_parse_from(["dwm", "run", "extra"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
