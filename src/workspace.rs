@@ -326,22 +326,12 @@ fn new_workspace_inner(
     Ok(())
 }
 
-/// Detect the VCS backend for `cwd`, accounting for the case where `cwd` is
-/// inside a dwm workspace dir.
-fn detect_backend_from_cwd(cwd: &Path) -> Result<Box<dyn vcs::VcsBackend>> {
-    // If we're inside a dwm workspace, the workspace dir itself contains
-    // VCS metadata too, so plain detect() works. But we want to be tolerant
-    // of being inside a workspace whose contents haven't been committed (the
-    // workspace dir always has VCS state set up by jj/git when it was added).
-    vcs::detect(cwd)
-}
-
 /// Deletes a workspace. Returns `true` if the cwd was inside the deleted
 /// workspace and a redirect path was printed to stdout.
 /// Delete a workspace by name (or infer from cwd).
 pub fn delete_workspace(name: Option<String>, output: DeleteOutput) -> Result<bool> {
     let cwd = std::env::current_dir()?;
-    let backend = detect_backend_from_cwd(&cwd)?;
+    let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
     if let Some(redirect) = delete_workspace_inner(&deps, name, output)? {
         println!("{}", redirect.display());
@@ -410,7 +400,7 @@ fn delete_workspace_inner(
 /// wrapper to `cd` into.
 pub fn switch_workspace(name: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let backend = detect_backend_from_cwd(&cwd)?;
+    let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
     let path = switch_workspace_inner(&deps, name)?;
     println!("{}", path.display());
@@ -438,7 +428,7 @@ fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
 /// as the new name and the old name is inferred from the current directory.
 pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let backend = detect_backend_from_cwd(&cwd)?;
+    let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
 
     let (old, new) = match new_name {
@@ -536,7 +526,7 @@ pub fn current_repo_dir() -> Result<PathBuf> {
 /// repository that contains the current directory.
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let cwd = std::env::current_dir()?;
-    let backend = detect_backend_from_cwd(&cwd)?;
+    let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
     list_workspace_entries_inner(&deps)
 }
