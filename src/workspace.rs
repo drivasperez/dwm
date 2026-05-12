@@ -172,16 +172,40 @@ fn read_and_prune_registry() -> Result<Vec<PathBuf>> {
     Ok(survivors)
 }
 
+/// Resolve the path of git's `info/exclude` for `repo_root` by shelling out to
+/// `git rev-parse --git-path info/exclude`. This works uniformly for main
+/// clones (where `.git` is a directory) and worktrees (where `.git` is a
+/// gitlink file pointing at `<commondir>/worktrees/<name>`).
+fn git_info_exclude_path(repo_root: &Path) -> Result<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .current_dir(repo_root)
+        .output()
+        .context("running `git rev-parse --git-path info/exclude`")?;
+    if !out.status.success() {
+        // Fall back to the obvious main-clone location.
+        return Ok(repo_root.join(".git/info/exclude"));
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p = PathBuf::from(s);
+    Ok(if p.is_absolute() {
+        p
+    } else {
+        repo_root.join(p)
+    })
+}
+
 /// Append `.dwm/` to the appropriate ignore file for `repo_root` if not present.
 ///
-/// - For repos with a real `.git` directory we append to `.git/info/exclude`
-///   (a per-clone, untracked ignore list).
+/// - For repos with `.git` (directory or worktree gitlink), we ask git itself
+///   where the per-clone exclude file lives via `git rev-parse --git-path
+///   info/exclude`, so worktrees write to the right file rather than mutating
+///   the tracked `.gitignore`.
 /// - For jj-only repos we append to `<repo_root>/.gitignore` (jj honours the
 ///   gitignore syntax even when there is no git directory).
 fn ensure_dwm_ignored(repo_root: &Path) -> Result<()> {
-    let git_dir = repo_root.join(".git");
-    let target = if git_dir.is_dir() {
-        git_dir.join("info").join("exclude")
+    let target = if repo_root.join(".git").exists() {
+        git_info_exclude_path(repo_root)?
     } else {
         repo_root.join(".gitignore")
     };
@@ -1204,6 +1228,66 @@ mod tests {
         let gi = fs::read_to_string(repo.join(".gitignore")).unwrap();
         assert!(gi.contains("target/\n"));
         assert!(gi.contains(".dwm/"));
+    }
+
+    #[test]
+    fn ignore_writes_to_per_worktree_exclude_not_gitignore() {
+        // Regression: previously, ensure_dwm_ignored saw `.git` as a file (the
+        // worktree gitlink) and fell through to writing `.gitignore`, which is
+        // tracked. With git rev-parse it now writes to the untracked exclude.
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+
+        fn run(args: &[&str], cwd: &Path) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        run(&["init", "-b", "main"], &main);
+        run(&["config", "user.email", "test@test"], &main);
+        run(&["config", "user.name", "test"], &main);
+        fs::write(main.join("file"), "hello").unwrap();
+        run(&["add", "."], &main);
+        run(&["commit", "-m", "init"], &main);
+
+        let wt = tmp.path().join("wt");
+        run(
+            &["worktree", "add", wt.to_str().unwrap(), "-b", "feat"],
+            &main,
+        );
+
+        // Sanity check the test setup: in the worktree, `.git` is a file.
+        assert!(wt.join(".git").is_file());
+
+        ensure_dwm_ignored(&wt).unwrap();
+
+        // Must NOT have created a tracked .gitignore in the worktree root.
+        assert!(
+            !wt.join(".gitignore").exists(),
+            "ensure_dwm_ignored should not write to tracked .gitignore in a worktree"
+        );
+
+        // The rule should land in *some* untracked exclude file. Resolve the
+        // exact path via git itself.
+        let resolved = git_info_exclude_path(&wt).unwrap();
+        let exclude = fs::read_to_string(&resolved)
+            .unwrap_or_else(|e| panic!("could not read {}: {}", resolved.display(), e));
+        assert!(
+            exclude.contains(".dwm/"),
+            "expected .dwm/ in {}: {:?}",
+            resolved.display(),
+            exclude
+        );
     }
 
     #[test]
