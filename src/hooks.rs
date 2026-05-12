@@ -183,7 +183,8 @@ pub fn run_setup(hooks: &Hooks, ctx: &HookContext) -> Result<()> {
 
     eprintln!("running setup script: {}", cmd);
 
-    let mut child = Command::new("sh")
+    let mut builder = Command::new("sh");
+    builder
         .arg("-c")
         .arg(cmd)
         .current_dir(&ctx.workspace_path)
@@ -192,14 +193,23 @@ pub fn run_setup(hooks: &Hooks, ctx: &HookContext) -> Result<()> {
         .env("DWM_REPO_ROOT", &ctx.repo_root)
         .env("DWM_VCS", ctx.vcs_type.to_string())
         .env("CONDUCTOR_ROOT_PATH", &ctx.workspace_path)
-        .envs(
-            ctx.from_workspace
-                .as_deref()
-                .map(|f| ("DWM_FROM_WORKSPACE", f)),
-        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Set DWM_FROM_WORKSPACE explicitly — never inherit from the parent. The
+    // var must be present iff --from was passed, regardless of what the
+    // calling process happens to have in its own env.
+    match ctx.from_workspace.as_deref() {
+        Some(f) => {
+            builder.env("DWM_FROM_WORKSPACE", f);
+        }
+        None => {
+            builder.env_remove("DWM_FROM_WORKSPACE");
+        }
+    }
+
+    let mut child = builder
         .spawn()
         .with_context(|| format!("spawning setup script: sh -c {:?}", cmd))?;
 
@@ -508,7 +518,10 @@ setup = "from-dwm-toml"
     }
 
     #[test]
-    fn run_setup_unsets_from_workspace_when_absent() {
+    fn run_setup_does_not_inherit_dwm_from_workspace() {
+        // Regression: previously the runner only conditionally set
+        // DWM_FROM_WORKSPACE, so when from_workspace was None the child would
+        // silently inherit any value the parent process had.
         let dir = tempfile::tempdir().unwrap();
         let hooks = Hooks {
             setup: Some("echo \"${DWM_FROM_WORKSPACE:-<unset>}\" > from".to_string()),
@@ -521,16 +534,10 @@ setup = "from-dwm-toml"
             vcs_type: VcsType::Jj,
             from_workspace: None,
         };
-        // Make sure no inherited env var leaks in.
-        // SAFETY: tests in this module set a process-global env var; we then
-        // assert the child does NOT see it because we did not pass it through.
-        // However Command inherits parent env by default — to validate
-        // "absent means unset on the child", we'd need .env_clear(). Since we
-        // do inherit, we instead just verify the runner itself does not set
-        // a literal "DWM_FROM_WORKSPACE" when the option is None. We do that
-        // by ensuring the parent's env doesn't have it set first.
-        // SAFETY: single-threaded test scope for this var.
-        unsafe { std::env::remove_var("DWM_FROM_WORKSPACE") };
+        // SAFETY: nextest runs each test in its own process by default, so
+        // setting a process-global env var here is safe and doesn't race with
+        // other tests.
+        unsafe { std::env::set_var("DWM_FROM_WORKSPACE", "leaked-value") };
         run_setup(&hooks, &ctx).unwrap();
         let v = std::fs::read_to_string(dir.path().join("from")).unwrap();
         assert_eq!(v.trim(), "<unset>");
