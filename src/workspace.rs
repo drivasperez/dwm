@@ -33,32 +33,55 @@ fn dwm_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".dwm")
 }
 
+/// Return the per-repo worktrees directory: `<repo_root>/.dwm/worktrees/`.
+///
+/// This is the namespace workspaces live under. Sibling dirs under `.dwm/`
+/// (e.g. `agent-status/`) hold dwm-internal state and never collide with
+/// workspace names.
+fn worktrees_dir(repo_root: &Path) -> PathBuf {
+    dwm_dir(repo_root).join("worktrees")
+}
+
 /// Return `true` if `dir` looks like a VCS root (contains `.jj` or `.git`).
 fn is_vcs_root(dir: &Path) -> bool {
     dir.join(".jj").is_dir() || dir.join(".git").exists()
 }
 
-/// Walk up from `cwd` looking for `<repo_root>/.dwm/<workspace>/`.
+/// Reject workspace names that would break path construction. We allow leading
+/// dots (with this layout, `.foo` is just a directory name inside
+/// `.dwm/worktrees/` — no collision with `agent-status/` or other internal
+/// dirs), but `.`, `..`, and names with path separators are still nonsense.
+fn validate_workspace_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        bail!("invalid workspace name '{}'", name);
+    }
+    Ok(())
+}
+
+/// Walk up from `cwd` looking for `<repo_root>/.dwm/worktrees/<workspace>/`.
 ///
 /// Returns `Some((repo_root, workspace_name, workspace_path))` when the cwd
 /// is inside a dwm-managed workspace, or `None` otherwise.
 pub fn find_dwm_workspace(cwd: &Path) -> Option<(PathBuf, String, PathBuf)> {
-    // We're looking for the pattern .../<repo_root>/.dwm/<ws_name>/...
+    // We're looking for the pattern .../<repo_root>/.dwm/worktrees/<ws_name>/...
     // Walk from cwd upwards and check each ancestor.
     let mut current = cwd.to_path_buf();
     loop {
-        // If `current`'s parent is `.dwm` and that dir's parent is a VCS root,
-        // then `current` is the workspace dir.
+        // If `current`'s parent is `worktrees`, its grandparent is `.dwm`, and
+        // its great-grandparent is a VCS root, then `current` is the workspace
+        // dir.
         if let Some(parent) = current.parent()
-            && parent.file_name().and_then(|n| n.to_str()) == Some(".dwm")
-            && let Some(grandparent) = parent.parent()
-            && is_vcs_root(grandparent)
+            && parent.file_name().and_then(|n| n.to_str()) == Some("worktrees")
+            && let Some(dwm) = parent.parent()
+            && dwm.file_name().and_then(|n| n.to_str()) == Some(".dwm")
+            && let Some(root) = dwm.parent()
+            && is_vcs_root(root)
         {
             let ws_name = current
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            return Some((grandparent.to_path_buf(), ws_name, current));
+            return Some((root.to_path_buf(), ws_name, current));
         }
         if !current.pop() {
             break;
@@ -195,8 +218,8 @@ struct WorkspaceDeps {
 }
 
 /// Resolve the repo root for the current working directory, whether the cwd
-/// is inside a dwm workspace (`<root>/.dwm/<ws>/...`) or anywhere else inside
-/// the repo.
+/// is inside a dwm workspace (`<root>/.dwm/worktrees/<ws>/...`) or anywhere
+/// else inside the repo.
 fn resolve_repo_root(deps: &WorkspaceDeps) -> Result<PathBuf> {
     if let Some((root, _, _)) = find_dwm_workspace(&deps.cwd) {
         return Ok(root);
@@ -226,8 +249,9 @@ fn new_workspace_inner(
 ) -> Result<()> {
     let root = resolve_repo_root(deps)?;
     let dwm = dwm_dir(&root);
+    let worktrees = worktrees_dir(&root);
     let first_time = !dwm.exists();
-    fs::create_dir_all(&dwm)?;
+    fs::create_dir_all(&worktrees)?;
 
     if first_time {
         // Best-effort: don't fail workspace creation if ignore-update fails.
@@ -259,15 +283,13 @@ fn new_workspace_inner(
 
     let ws_name = match name {
         Some(n) => {
-            if n.starts_with('.') {
-                bail!("workspace name cannot start with '.'");
-            }
+            validate_workspace_name(&n)?;
             n
         }
-        None => names::generate_unique(&dwm),
+        None => names::generate_unique(&worktrees),
     };
 
-    let ws_path = dwm.join(&ws_name);
+    let ws_path = worktrees.join(&ws_name);
     if ws_path.exists() {
         bail!(
             "workspace '{}' already exists at {}",
@@ -349,7 +371,7 @@ fn delete_workspace_inner(
         }
     };
 
-    let ws_path = dwm_dir(&root).join(&ws_name);
+    let ws_path = worktrees_dir(&root).join(&ws_name);
     if !ws_path.exists() {
         bail!("workspace '{}' not found at {}", ws_name, ws_path.display());
     }
@@ -404,7 +426,7 @@ fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
         return Ok(root);
     }
 
-    let ws_path = dwm_dir(&root).join(name);
+    let ws_path = worktrees_dir(&root).join(name);
     if !ws_path.exists() {
         bail!("workspace '{}' not found at {}", name, ws_path.display());
     }
@@ -454,8 +476,8 @@ fn rename_workspace_inner(
         bail!("cannot rename the main workspace '{}'", old_name);
     }
 
-    let dwm = dwm_dir(&root);
-    let old_path = dwm.join(old_name);
+    let worktrees = worktrees_dir(&root);
+    let old_path = worktrees.join(old_name);
     if !old_path.exists() {
         bail!(
             "workspace '{}' not found at {}",
@@ -464,11 +486,9 @@ fn rename_workspace_inner(
         );
     }
 
-    if new_name.starts_with('.') {
-        bail!("workspace name cannot start with '.'");
-    }
+    validate_workspace_name(new_name)?;
 
-    let new_path = dwm.join(new_name);
+    let new_path = worktrees.join(new_name);
     if new_path.exists() {
         bail!(
             "workspace '{}' already exists at {}",
@@ -568,12 +588,15 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
         agent_status: agent_summaries.remove(main_ws_name),
     });
 
-    if !dwm.exists() {
+    let worktrees = worktrees_dir(&main_repo);
+    if !worktrees.exists() {
         return Ok(entries);
     }
 
-    // Scan workspace dirs
-    let read_dir = fs::read_dir(&dwm)?;
+    // Scan workspace dirs under .dwm/worktrees/. Internal dwm state lives in
+    // sibling dirs (e.g. .dwm/agent-status/) so there's no need to filter
+    // entries here — every dir under worktrees/ is a workspace.
+    let read_dir = fs::read_dir(&worktrees)?;
     for entry in read_dir {
         let entry = entry?;
         let path = entry.path();
@@ -581,11 +604,6 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        // Skip internal dot-prefixed entries (.agent-status, etc.)
-        if name.starts_with('.') {
-            continue;
-        }
 
         let ws_info = vcs_workspaces
             .iter()
@@ -963,26 +981,26 @@ mod tests {
 
     #[test]
     fn is_inside_detects_cwd_within_workspace() {
-        let ws = Path::new("/home/user/repos/myrepo/.dwm/my-workspace");
+        let ws = Path::new("/home/user/repos/myrepo/.dwm/worktrees/my-workspace");
         assert!(is_inside(ws, ws));
         assert!(is_inside(
-            Path::new("/home/user/repos/myrepo/.dwm/my-workspace/src"),
+            Path::new("/home/user/repos/myrepo/.dwm/worktrees/my-workspace/src"),
             ws,
         ));
     }
 
     #[test]
     fn is_inside_false_for_sibling_workspace() {
-        let ws = Path::new("/home/user/repos/myrepo/.dwm/my-workspace");
+        let ws = Path::new("/home/user/repos/myrepo/.dwm/worktrees/my-workspace");
         assert!(!is_inside(
-            Path::new("/home/user/repos/myrepo/.dwm/other-workspace"),
+            Path::new("/home/user/repos/myrepo/.dwm/worktrees/other-workspace"),
             ws,
         ));
     }
 
     #[test]
     fn is_inside_false_for_main_repo() {
-        let ws = Path::new("/home/user/repos/myrepo/.dwm/my-workspace");
+        let ws = Path::new("/home/user/repos/myrepo/.dwm/worktrees/my-workspace");
         assert!(!is_inside(Path::new("/home/user/code/myrepo"), ws));
     }
 
@@ -999,7 +1017,7 @@ mod tests {
     fn find_dwm_workspace_in_workspace_root() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = make_fake_repo(tmp.path(), ".jj");
-        let ws = repo.join(".dwm").join("feature");
+        let ws = repo.join(".dwm/worktrees").join("feature");
         fs::create_dir_all(&ws).unwrap();
 
         let (root, name, path) = find_dwm_workspace(&ws).unwrap();
@@ -1012,7 +1030,7 @@ mod tests {
     fn find_dwm_workspace_in_workspace_subdir() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = make_fake_repo(tmp.path(), ".git");
-        let ws = repo.join(".dwm").join("feat-x");
+        let ws = repo.join(".dwm/worktrees").join("feat-x");
         let sub = ws.join("src/inner");
         fs::create_dir_all(&sub).unwrap();
 
@@ -1033,11 +1051,35 @@ mod tests {
     #[test]
     fn find_dwm_workspace_returns_none_when_no_vcs_root_parent() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create .dwm/ws without a VCS root parent
+        // Create .dwm/worktrees/ws without a VCS root parent
         let fake = tmp.path().join("notarepo");
-        let ws = fake.join(".dwm").join("feature");
+        let ws = fake.join(".dwm/worktrees").join("feature");
         fs::create_dir_all(&ws).unwrap();
         assert!(find_dwm_workspace(&ws).is_none());
+    }
+
+    #[test]
+    fn find_dwm_workspace_ignores_sibling_internal_dirs() {
+        // Regression: pre-refactor, find_dwm_workspace returned `.agent-status`
+        // as a workspace name when cwd was under `<root>/.dwm/.agent-status/`.
+        // With the worktrees/ namespace that confusion is gone.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_fake_repo(tmp.path(), ".jj");
+        let agent = repo.join(".dwm/agent-status");
+        fs::create_dir_all(&agent).unwrap();
+        assert!(find_dwm_workspace(&agent).is_none());
+    }
+
+    #[test]
+    fn find_dwm_workspace_allows_dot_prefixed_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_fake_repo(tmp.path(), ".jj");
+        let ws = repo.join(".dwm/worktrees").join(".hidden-feature");
+        fs::create_dir_all(&ws).unwrap();
+
+        let (root, name, _) = find_dwm_workspace(&ws).unwrap();
+        assert_eq!(root, repo);
+        assert_eq!(name, ".hidden-feature");
     }
 
     // ── registry tests ────────────────────────────────────────────────
@@ -1341,8 +1383,7 @@ mod tests {
     fn list_entries_from_inside_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let dwm = main_repo.join(".dwm");
-        let ws_dir = dwm.join("feat-x");
+        let ws_dir = main_repo.join(".dwm/worktrees/feat-x");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let workspaces = vec![
@@ -1386,13 +1427,16 @@ mod tests {
     }
 
     #[test]
-    fn list_entries_skips_dot_prefixed_dirs() {
+    fn list_entries_only_scans_worktrees_subdir() {
+        // Sibling dirs under .dwm/ (e.g. agent-status/) must not show up as
+        // workspaces. With the worktrees/ namespace this falls out for free
+        // because list iteration only reads .dwm/worktrees/.
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
         let dwm = main_repo.join(".dwm");
-        let ws_dir = dwm.join("feat-x");
+        let ws_dir = dwm.join("worktrees/feat-x");
         fs::create_dir_all(&ws_dir).unwrap();
-        fs::create_dir_all(dwm.join(".agent-status")).unwrap();
+        fs::create_dir_all(dwm.join("agent-status")).unwrap();
 
         let workspaces = vec![
             (
@@ -1422,8 +1466,8 @@ mod tests {
         let entries = list_workspace_entries_inner(&deps).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(
-            !names.contains(&".agent-status"),
-            "dot-prefixed dirs should be excluded, got: {:?}",
+            !names.contains(&"agent-status"),
+            "sibling internal dirs should not appear, got: {:?}",
             names
         );
         assert!(names.contains(&"feat-x"));
@@ -1500,7 +1544,7 @@ mod tests {
                 at,
             } => {
                 assert_eq!(repo_dir, &main_repo);
-                assert_eq!(ws_path, &main_repo.join(".dwm/my-ws"));
+                assert_eq!(ws_path, &main_repo.join(".dwm/worktrees/my-ws"));
                 assert_eq!(name, "my-ws");
                 assert!(at.is_none());
             }
@@ -1559,7 +1603,27 @@ mod tests {
     }
 
     #[test]
-    fn new_workspace_dot_prefix_rejected() {
+    fn new_workspace_allows_dot_prefixed_names() {
+        // Pre-refactor `.foo` was rejected to avoid collision with `.agent-status`.
+        // With workspaces under `.dwm/worktrees/`, there's no collision risk and
+        // names starting with `.` are allowed.
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+
+        with_data_dir(tmp.path(), || {
+            new_workspace_inner(&deps, Some(".hidden".to_string()), None, None).unwrap();
+        });
+        assert!(main_repo.join(".dwm/worktrees/.hidden").exists());
+    }
+
+    #[test]
+    fn new_workspace_rejects_invalid_names() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
 
@@ -1570,13 +1634,17 @@ mod tests {
         };
 
         with_data_dir(tmp.path(), || {
-            let err = new_workspace_inner(&deps, Some(".agent-status".to_string()), None, None)
-                .unwrap_err();
-            assert!(
-                err.to_string().contains("cannot start with '.'"),
-                "error: {}",
-                err
-            );
+            for bad in [".", "..", "foo/bar", "with\\backslash", ""] {
+                let err = new_workspace_inner(&deps, Some(bad.to_string()), None, None)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    err.contains("invalid workspace name"),
+                    "expected rejection for {:?}, got: {}",
+                    bad,
+                    err
+                );
+            }
         });
     }
 
@@ -1611,7 +1679,7 @@ mod tests {
             MockCall::WorkspaceAdd {
                 ws_path, name, at, ..
             } => {
-                assert_eq!(ws_path, &main_repo.join(".dwm/forked"));
+                assert_eq!(ws_path, &main_repo.join(".dwm/worktrees/forked"));
                 assert_eq!(name, "forked");
                 assert_eq!(at.as_deref(), Some("abc12345"));
             }
@@ -1685,7 +1753,7 @@ mod tests {
     fn delete_workspace_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/my-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/my-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1724,7 +1792,7 @@ mod tests {
     fn delete_workspace_redirects_when_inside() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/my-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/my-ws");
         fs::create_dir_all(ws_dir.join("src")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1744,7 +1812,7 @@ mod tests {
     fn delete_workspace_infers_from_cwd() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/inferred-ws");
+        let ws_dir = main_repo.join(".dwm/worktrees/inferred-ws");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1790,7 +1858,7 @@ mod tests {
     fn rename_workspace_success() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/old-name");
+        let ws_dir = main_repo.join(".dwm/worktrees/old-name");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1806,7 +1874,7 @@ mod tests {
         );
 
         assert!(!ws_dir.exists());
-        assert!(main_repo.join(".dwm/new-name").exists());
+        assert!(main_repo.join(".dwm/worktrees/new-name").exists());
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1825,7 +1893,7 @@ mod tests {
     fn rename_workspace_redirects_when_inside() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/old-name");
+        let ws_dir = main_repo.join(".dwm/worktrees/old-name");
         fs::create_dir_all(ws_dir.join("src")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1836,14 +1904,14 @@ mod tests {
 
         let redirect = rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
-        assert_eq!(redirect, main_repo.join(".dwm/new-name/src"));
+        assert_eq!(redirect, main_repo.join(".dwm/worktrees/new-name/src"));
     }
 
     #[test]
     fn rename_workspace_preserves_files() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/old-name");
+        let ws_dir = main_repo.join(".dwm/worktrees/old-name");
         fs::create_dir_all(ws_dir.join("src")).unwrap();
         fs::write(ws_dir.join("src/main.rs"), "fn main() {}").unwrap();
         fs::write(ws_dir.join("README.md"), "# hello").unwrap();
@@ -1856,7 +1924,7 @@ mod tests {
 
         rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
 
-        let new_dir = main_repo.join(".dwm/new-name");
+        let new_dir = main_repo.join(".dwm/worktrees/new-name");
         assert!(new_dir.join("src/main.rs").exists());
         assert_eq!(
             fs::read_to_string(new_dir.join("src/main.rs")).unwrap(),
@@ -1887,8 +1955,8 @@ mod tests {
     fn rename_workspace_new_already_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        fs::create_dir_all(main_repo.join(".dwm/old-name")).unwrap();
-        fs::create_dir_all(main_repo.join(".dwm/new-name")).unwrap();
+        fs::create_dir_all(main_repo.join(".dwm/worktrees/old-name")).unwrap();
+        fs::create_dir_all(main_repo.join(".dwm/worktrees/new-name")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1916,10 +1984,10 @@ mod tests {
     }
 
     #[test]
-    fn rename_workspace_dot_prefix_rejected() {
+    fn rename_workspace_rejects_invalid_target() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        fs::create_dir_all(main_repo.join(".dwm/old-name")).unwrap();
+        fs::create_dir_all(main_repo.join(".dwm/worktrees/old-name")).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
         let deps = WorkspaceDeps {
@@ -1927,12 +1995,28 @@ mod tests {
             cwd: main_repo,
         };
 
-        let err = rename_workspace_inner(&deps, "old-name", ".hidden").unwrap_err();
+        let err = rename_workspace_inner(&deps, "old-name", "..").unwrap_err();
         assert!(
-            err.to_string().contains("cannot start with '.'"),
+            err.to_string().contains("invalid workspace name"),
             "error: {}",
             err
         );
+    }
+
+    #[test]
+    fn rename_workspace_allows_dot_prefixed_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        fs::create_dir_all(main_repo.join(".dwm/worktrees/old-name")).unwrap();
+
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+
+        rename_workspace_inner(&deps, "old-name", ".hidden").unwrap();
+        assert!(main_repo.join(".dwm/worktrees/.hidden").exists());
     }
 
     // ── switch_workspace_inner tests ──────────────────────────────
@@ -1941,7 +2025,7 @@ mod tests {
     fn switch_workspace_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/feat-x");
+        let ws_dir = main_repo.join(".dwm/worktrees/feat-x");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -1990,7 +2074,7 @@ mod tests {
     fn rename_infers_from_cwd() {
         let tmp = tempfile::tempdir().unwrap();
         let main_repo = make_repo_with_vcs(tmp.path());
-        let ws_dir = main_repo.join(".dwm/old-name");
+        let ws_dir = main_repo.join(".dwm/worktrees/old-name");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
@@ -2004,7 +2088,7 @@ mod tests {
 
         let redirect = rename_workspace_inner(&deps, &old, "new-name").unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
-        assert_eq!(redirect, main_repo.join(".dwm/new-name"));
+        assert_eq!(redirect, main_repo.join(".dwm/worktrees/new-name"));
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -2284,7 +2368,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         // Create a git worktree at <repo>/.dwm/feat-branch
-        let ws_path = main_repo.join(".dwm/feat-branch");
+        let ws_path = main_repo.join(".dwm/worktrees/feat-branch");
         fs::create_dir_all(ws_path.parent().unwrap()).unwrap();
         std::process::Command::new("git")
             .args([
@@ -2338,7 +2422,7 @@ mod tests {
             };
 
             new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/test-ws");
+            let ws_dir = main_repo.join(".dwm/worktrees/test-ws");
             assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
             let deps2 = WorkspaceDeps {
@@ -2381,7 +2465,7 @@ mod tests {
             };
 
             new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/feature");
+            let ws_dir = main_repo.join(".dwm/worktrees/feature");
 
             fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
             let ws_str = ws_dir.to_str().unwrap();
@@ -2424,7 +2508,7 @@ mod tests {
             };
 
             new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
-            let old_path = main_repo.join(".dwm/old-name");
+            let old_path = main_repo.join(".dwm/worktrees/old-name");
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
@@ -2434,7 +2518,7 @@ mod tests {
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
 
             assert!(!old_path.exists(), "old dir should be gone");
-            assert!(main_repo.join(".dwm/new-name").exists());
+            assert!(main_repo.join(".dwm/worktrees/new-name").exists());
 
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend),
@@ -2461,7 +2545,7 @@ mod tests {
             };
 
             new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
-            let ws_path = main_repo.join(".dwm/my-ws");
+            let ws_path = main_repo.join(".dwm/worktrees/my-ws");
             let subdir = ws_path.join("src");
             fs::create_dir_all(&subdir).unwrap();
 
@@ -2471,9 +2555,9 @@ mod tests {
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
             let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
-            assert_eq!(redirect, main_repo.join(".dwm/renamed-ws/src"));
+            assert_eq!(redirect, main_repo.join(".dwm/worktrees/renamed-ws/src"));
 
-            let new_ws = main_repo.join(".dwm/renamed-ws");
+            let new_ws = main_repo.join(".dwm/worktrees/renamed-ws");
             assert!(new_ws.exists());
             assert!(new_ws.join("src").exists());
         });
@@ -2538,7 +2622,7 @@ mod tests {
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_jj_repo(&repo_path);
 
-        let ws_path = main_repo.join(".dwm/feat-ws");
+        let ws_path = main_repo.join(".dwm/worktrees/feat-ws");
         fs::create_dir_all(ws_path.parent().unwrap()).unwrap();
         std::process::Command::new("jj")
             .args([
@@ -2589,7 +2673,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/test-ws");
+            let ws_dir = main_repo.join(".dwm/worktrees/test-ws");
             assert!(ws_dir.exists());
 
             let deps2 = WorkspaceDeps {
@@ -2630,7 +2714,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("my cool feature".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/my cool feature");
+            let ws_dir = main_repo.join(".dwm/worktrees/my cool feature");
             assert!(ws_dir.exists());
 
             let deps2 = WorkspaceDeps {
@@ -2675,7 +2759,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/feature");
+            let ws_dir = main_repo.join(".dwm/worktrees/feature");
 
             fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
             let ws_str = ws_dir.to_str().unwrap();
@@ -2713,7 +2797,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
-            let old_path = main_repo.join(".dwm/old-name");
+            let old_path = main_repo.join(".dwm/worktrees/old-name");
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
@@ -2723,7 +2807,7 @@ mod tests {
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
 
             assert!(!old_path.exists());
-            assert!(main_repo.join(".dwm/new-name").exists());
+            assert!(main_repo.join(".dwm/worktrees/new-name").exists());
 
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
@@ -2763,8 +2847,8 @@ mod tests {
             };
             rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
 
-            assert!(!main_repo.join(".dwm/my-ws").exists());
-            assert!(main_repo.join(".dwm/renamed-ws").exists());
+            assert!(!main_repo.join(".dwm/worktrees/my-ws").exists());
+            assert!(main_repo.join(".dwm/worktrees/renamed-ws").exists());
 
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
@@ -2790,7 +2874,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/switch-target");
+            let ws_dir = main_repo.join(".dwm/worktrees/switch-target");
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend),
@@ -2822,7 +2906,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
-            let ws_dir = main_repo.join(".dwm/switch-target");
+            let ws_dir = main_repo.join(".dwm/worktrees/switch-target");
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
@@ -2854,7 +2938,7 @@ mod tests {
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
-            let ws_path = main_repo.join(".dwm/my-ws");
+            let ws_path = main_repo.join(".dwm/worktrees/my-ws");
             let subdir = ws_path.join("src");
             fs::create_dir_all(&subdir).unwrap();
 
@@ -2864,9 +2948,9 @@ mod tests {
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
             let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
-            assert_eq!(redirect, main_repo.join(".dwm/renamed-ws/src"));
+            assert_eq!(redirect, main_repo.join(".dwm/worktrees/renamed-ws/src"));
 
-            let new_ws = main_repo.join(".dwm/renamed-ws");
+            let new_ws = main_repo.join(".dwm/worktrees/renamed-ws");
             assert!(new_ws.exists());
             assert!(new_ws.join("src").exists());
         });

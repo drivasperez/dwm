@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is dwm
 
-dwm is a TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS) and git. It creates, lists, and deletes workspaces stored under `<repo-root>/.dwm/<name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
+dwm is a TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS) and git. It creates, lists, and deletes workspaces stored under `<repo-root>/.dwm/worktrees/<name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
 
 ## Build & Test Commands
 
@@ -41,7 +41,7 @@ Every bug fix should include a regression test. New parsing functions and utilit
 - **stdout vs stderr convention:** stdout is reserved for machine-readable output (paths the shell wrapper acts on). All human messages go to stderr via `eprintln!`.
 - **jj template parsing:** `jj.rs` uses NUL-separated (`\0`) fields in jj templates with `\0\n` as record separator, parsed by `parse_workspace_info()`. This avoids issues with descriptions containing tabs/newlines.
 - **`latest_description()`** walks ancestors via `jj log` with revset `latest(ancestors(WS@) & description(glob:"?*"))` to find the first non-empty commit description.
-- **Workspace storage:** workspaces live at `<repo-root>/.dwm/<name>/`. The first time a workspace is created in a repo, dwm appends `.dwm/` to `.git/info/exclude` (or `.gitignore` for jj-only repos) so the directory is not tracked. A cross-platform registry at `dirs::data_dir()/dwm/repos.txt` records repos that have ever had a workspace, used by `dwm list --all`. Agent status data lives in `<repo-root>/.dwm/.agent-status/` (skipped during workspace listing because of the dot-prefix).
+- **Workspace storage:** workspaces live at `<repo-root>/.dwm/worktrees/<name>/`. The first time a workspace is created in a repo, dwm appends `.dwm/` to `.git/info/exclude` (or `.gitignore` for jj-only repos) so the directory is not tracked. A cross-platform registry at `dirs::data_dir()/dwm/repos.txt` records repos that have ever had a workspace, used by `dwm list --all`. Agent status data lives in `<repo-root>/.dwm/agent-status/` — a sibling of `worktrees/` so workspace names and internal metadata can't collide.
 
 ## Documentation
 

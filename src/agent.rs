@@ -73,9 +73,9 @@ impl fmt::Display for AgentSummary {
     }
 }
 
-/// Return the `.agent-status` directory for a repo.
+/// Return the `agent-status` directory inside a per-repo `.dwm/` dir.
 fn agent_status_dir(repo_dir: &Path) -> PathBuf {
-    repo_dir.join(".agent-status")
+    repo_dir.join("agent-status")
 }
 
 /// Convert a unix timestamp to a [`SystemTime`].
@@ -206,9 +206,9 @@ pub fn remove_agent_statuses_for_workspace(repo_dir: &Path, workspace: &str) {
 /// Returns `None` if the path doesn't correspond to a dwm-managed workspace.
 ///
 /// The returned `agent_status_dir` is the per-repo `.dwm/` directory (which is
-/// the directory the agent-status JSON files live under, in `.agent-status/`).
+/// the directory the agent-status JSON files live under, in `agent-status/`).
 fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
-    // Case 1: cwd is inside a dwm workspace under <root>/.dwm/<ws>/...
+    // Case 1: cwd is inside a dwm workspace under <root>/.dwm/worktrees/<ws>/...
     if let Some((root, ws_name, _ws_path)) = workspace::find_dwm_workspace(cwd) {
         return Some((root.join(".dwm"), ws_name));
     }
@@ -491,7 +491,7 @@ mod tests {
         status: &str,
         updated_at: u64,
     ) {
-        let agent_dir = dir.join(".agent-status");
+        let agent_dir = dir.join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         let content = format!(
             r#"{{"workspace":"{}","status":"{}","updated_at":{}}}"#,
@@ -660,7 +660,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        let ws = repo.join(".dwm/my-feature");
+        let ws = repo.join(".dwm/worktrees/my-feature");
         fs::create_dir_all(ws.join("src")).unwrap();
 
         let result = resolve_workspace_from_cwd(&ws.join("src"));
@@ -722,7 +722,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        let ws_dir = repo.join(".dwm/my-feature");
+        let ws_dir = repo.join(".dwm/worktrees/my-feature");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (agent_dir, ws) = resolve_workspace_from_cwd(&ws_dir).unwrap();
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn malformed_json_files_ignored() {
         let dir = TempDir::new().unwrap();
-        let agent_dir = dir.path().join(".agent-status");
+        let agent_dir = dir.path().join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(agent_dir.join("bad.json"), "not valid json").unwrap();
 
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn non_json_files_ignored() {
         let dir = TempDir::new().unwrap();
-        let agent_dir = dir.path().join(".agent-status");
+        let agent_dir = dir.path().join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(agent_dir.join("readme.txt"), "hello").unwrap();
 

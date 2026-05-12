@@ -1360,7 +1360,7 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let refresh_sender = app.refresh_mailbox.sender();
 
     // Collect unique (repo_name, agent_dir) pairs for agent polling.
-    // Agent statuses live in <repo_root>/.dwm/.agent-status, so we read from
+    // Agent statuses live in <repo_root>/.dwm/agent-status, so we read from
     // <main_repo_path>/.dwm/ for each repo represented in the entry list.
     let repo_dirs: Vec<(String, PathBuf)> = {
         let mut seen = std::collections::HashSet::new();
