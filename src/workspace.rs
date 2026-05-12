@@ -98,10 +98,17 @@ fn registry_path() -> Result<PathBuf> {
 
 /// Append `repo_root` to the registry file if not already present.
 ///
+/// The path is canonicalized so that invocations via a symlinked alias and the
+/// real path don't produce duplicate registry entries. Falls back to the
+/// original path if canonicalization fails (e.g. it doesn't exist yet).
+///
 /// Best-effort: errors are returned but the caller may choose to ignore them.
 fn register_repo(repo_root: &Path) -> Result<()> {
     let path = registry_path()?;
-    let canonical = repo_root.to_string_lossy().into_owned();
+    let canonical = fs::canonicalize(repo_root)
+        .unwrap_or_else(|_| repo_root.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
 
     // Read existing entries (if any) so we can dedupe.
     let existing = fs::read_to_string(&path).unwrap_or_default();
@@ -1131,7 +1138,7 @@ mod tests {
             register_repo(&repo).unwrap();
             register_repo(&repo).unwrap(); // dedupe
             let entries = read_and_prune_registry().unwrap();
-            assert_eq!(entries, vec![repo.clone()]);
+            assert_eq!(entries, vec![fs::canonicalize(&repo).unwrap()]);
         });
     }
 
@@ -1151,7 +1158,7 @@ mod tests {
             fs::write(&path, content).unwrap();
 
             let entries = read_and_prune_registry().unwrap();
-            assert_eq!(entries, vec![alive.clone()]);
+            assert_eq!(entries, vec![fs::canonicalize(&alive).unwrap()]);
 
             // The file should now have been rewritten without the dead entry.
             let after = fs::read_to_string(&path).unwrap();
@@ -1177,6 +1184,35 @@ mod tests {
         with_data_dir(tmp.path(), || {
             let entries = read_and_prune_registry().unwrap();
             assert!(entries.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registry_dedupes_symlinked_and_real_paths() {
+        // Regression: invoking dwm once via a symlinked path and once via the
+        // real path used to produce two registry entries. Canonicalization in
+        // register_repo collapses them to one.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = make_fake_repo(tmp.path(), ".jj");
+        fs::create_dir_all(real.join(".dwm")).unwrap();
+
+        let link = tmp.path().join("myrepo-symlink");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        with_data_dir(tmp.path(), || {
+            register_repo(&link).unwrap();
+            register_repo(&real).unwrap();
+            let entries = read_and_prune_registry().unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "expected single entry, got: {:?}",
+                entries
+            );
+            // The stored entry is the canonical form of `real`.
+            let expected = fs::canonicalize(&real).unwrap();
+            assert_eq!(entries[0], expected);
         });
     }
 
@@ -1817,7 +1853,7 @@ mod tests {
         with_data_dir(tmp.path(), || {
             new_workspace_inner(&deps, Some("ws".to_string()), None, None).unwrap();
             let entries = read_and_prune_registry().unwrap();
-            assert!(entries.contains(&main_repo));
+            assert!(entries.contains(&fs::canonicalize(&main_repo).unwrap()));
         });
     }
 
