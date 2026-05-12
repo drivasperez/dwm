@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::vcs::VcsType;
 use crate::workspace;
 
 /// How long before a status file is considered stale and ignored.
@@ -222,9 +223,9 @@ fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
         if dwm.is_dir() {
             // Determine main workspace name from VCS type.
             let ws_name = if current.join(".jj").is_dir() {
-                "default"
+                VcsType::Jj.main_workspace_name()
             } else if current.join(".git").exists() {
-                "main-worktree"
+                VcsType::Git.main_workspace_name()
             } else {
                 // No VCS marker here; keep walking up.
                 if !current.pop() {

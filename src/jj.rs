@@ -246,7 +246,7 @@ impl VcsBackend for JjBackend {
     }
 
     fn main_workspace_name(&self) -> &'static str {
-        "default"
+        vcs::VcsType::Jj.main_workspace_name()
     }
 
     fn preview_log(

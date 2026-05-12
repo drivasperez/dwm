@@ -16,6 +16,16 @@ impl VcsType {
             VcsType::Git => Box::new(crate::git::GitBackend),
         }
     }
+
+    /// Name of the primary workspace that lives in the original repo directory
+    /// (e.g. `"default"` for jj, `"main-worktree"` for git). The same value is
+    /// returned by [`VcsBackend::main_workspace_name`].
+    pub fn main_workspace_name(self) -> &'static str {
+        match self {
+            VcsType::Jj => "default",
+            VcsType::Git => "main-worktree",
+        }
+    }
 }
 
 impl fmt::Display for VcsType {
