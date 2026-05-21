@@ -163,7 +163,7 @@ fn matches_filter(entry: &WorkspaceEntry, query: &str) -> bool {
 fn sort_entries(entries: &mut [WorkspaceEntry], mode: SortMode) {
     match mode {
         SortMode::Name => {
-            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            entries.sort_by_key(|a| a.name.to_lowercase());
         }
         SortMode::Recency => {
             entries.sort_by(|a, b| {

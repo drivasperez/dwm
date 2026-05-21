@@ -562,6 +562,23 @@ pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     list_workspace_entries_inner(&deps)
 }
 
+/// Inputs for the per-workspace fan-out in [`list_workspace_entries_inner`].
+struct EntryCandidate {
+    name: String,
+    path: PathBuf,
+    is_main: bool,
+    info: vcs::WorkspaceInfo,
+    has_info: bool,
+}
+
+/// Per-workspace fields computed in parallel via VCS calls.
+struct ComputedEntry {
+    diff_stat: vcs::DiffStat,
+    description: String,
+    modified: Option<SystemTime>,
+    is_stale: bool,
+}
+
 /// Testable core of [`list_workspace_entries`].
 fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEntry>> {
     let main_repo = resolve_repo_root(deps)?;
@@ -571,104 +588,120 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
 
     let main_ws_name = deps.backend.main_workspace_name();
     let vcs_workspaces = deps.backend.workspace_list(&main_repo).unwrap_or_default();
+    let vcs_type = deps.backend.vcs_type();
 
-    let mut entries = Vec::new();
+    // Collect candidates in display order: main first, then each subdir of
+    // .dwm/worktrees/ (in fs::read_dir order, matching previous behaviour).
+    let mut candidates: Vec<EntryCandidate> = Vec::new();
 
-    // Find info for the main workspace
     let main_info = vcs_workspaces
         .iter()
         .find(|(n, _)| n == main_ws_name)
-        .map(|(_, info)| info.clone())
-        .unwrap_or_default();
-
-    let main_stat = deps
-        .backend
-        .diff_stat_vs_trunk(&main_repo, &main_repo, main_ws_name)
-        .unwrap_or_default();
-    let main_modified = fs::metadata(&main_repo).and_then(|m| m.modified()).ok();
-    let main_description = if main_info.description.trim().is_empty() {
-        deps.backend
-            .latest_description(&main_repo, &main_repo, main_ws_name)
-    } else {
-        main_info.description.clone()
-    };
-    let vcs_type = deps.backend.vcs_type();
-    entries.push(WorkspaceEntry {
+        .map(|(_, info)| info.clone());
+    candidates.push(EntryCandidate {
         name: main_ws_name.to_string(),
         path: main_repo.clone(),
-        last_modified: main_modified,
-        diff_stat: main_stat,
         is_main: true,
-        change_id: main_info.change_id.clone(),
-        description: main_description,
-        bookmarks: main_info.bookmarks.clone(),
-        is_stale: false,
-        repo_name: None,
-        main_repo_path: main_repo.clone(),
-        vcs_type,
-        agent_status: agent_summaries.remove(main_ws_name),
+        has_info: main_info.is_some(),
+        info: main_info.unwrap_or_default(),
     });
 
     let worktrees = worktrees_dir(&main_repo);
-    if !worktrees.exists() {
-        return Ok(entries);
+    if worktrees.exists() {
+        // Scan workspace dirs under .dwm/worktrees/. Internal dwm state lives
+        // in sibling dirs (e.g. .dwm/agent-status/) so there's no need to
+        // filter entries here — every dir under worktrees/ is a workspace.
+        for entry in fs::read_dir(&worktrees)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let info = vcs_workspaces
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, info)| info.clone());
+            candidates.push(EntryCandidate {
+                name,
+                path,
+                is_main: false,
+                has_info: info.is_some(),
+                info: info.unwrap_or_default(),
+            });
+        }
     }
 
-    // Scan workspace dirs under .dwm/worktrees/. Internal dwm state lives in
-    // sibling dirs (e.g. .dwm/agent-status/) so there's no need to filter
-    // entries here — every dir under worktrees/ is a workspace.
-    let read_dir = fs::read_dir(&worktrees)?;
-    for entry in read_dir {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        let ws_info = vcs_workspaces
+    // Fan out the per-workspace VCS calls. Each candidate runs up to 3 cold
+    // subprocesses (diff_stat_vs_trunk, optional latest_description,
+    // is_merged_into_trunk); these are independent across workspaces and dwarf
+    // the cost of spawning an OS thread per workspace.
+    let backend: &dyn vcs::VcsBackend = &*deps.backend;
+    let main_repo_ref: &Path = &main_repo;
+    let computed: Vec<ComputedEntry> = std::thread::scope(|s| {
+        let handles: Vec<_> = candidates
             .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, info)| info.clone());
+            .map(|c| {
+                s.spawn(move || {
+                    let modified = fs::metadata(&c.path).and_then(|m| m.modified()).ok();
 
-        let has_info = ws_info.is_some();
-        let info = ws_info.unwrap_or_default();
+                    let diff_stat = if c.is_main || c.has_info {
+                        backend
+                            .diff_stat_vs_trunk(main_repo_ref, &c.path, &c.name)
+                            .unwrap_or_default()
+                    } else {
+                        vcs::DiffStat::default()
+                    };
 
-        let stat = if has_info {
-            deps.backend
-                .diff_stat_vs_trunk(&main_repo, &path, &name)
-                .unwrap_or_default()
-        } else {
-            vcs::DiffStat::default()
-        };
+                    let description = if c.info.description.trim().is_empty() {
+                        backend.latest_description(main_repo_ref, &c.path, &c.name)
+                    } else {
+                        c.info.description.clone()
+                    };
 
-        let description = if info.description.trim().is_empty() {
-            deps.backend.latest_description(&main_repo, &path, &name)
-        } else {
-            info.description.clone()
-        };
+                    let is_stale = if c.is_main {
+                        false
+                    } else if stale_by_mtime(modified) {
+                        // Already stale by inactivity — skip the merged probe,
+                        // which is a VCS subprocess we don't need.
+                        true
+                    } else {
+                        let merge_status = if c.has_info
+                            && backend.is_merged_into_trunk(main_repo_ref, &c.path, &c.name)
+                        {
+                            MergeStatus::Merged
+                        } else {
+                            MergeStatus::Unmerged
+                        };
+                        compute_is_stale(merge_status, modified)
+                    };
 
-        let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    ComputedEntry {
+                        diff_stat,
+                        description,
+                        modified,
+                        is_stale,
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
-        let merge_status =
-            if has_info && deps.backend.is_merged_into_trunk(&main_repo, &path, &name) {
-                MergeStatus::Merged
-            } else {
-                MergeStatus::Unmerged
-            };
-
-        let agent_status = agent_summaries.remove(&name);
+    let mut entries = Vec::with_capacity(candidates.len());
+    for (c, comp) in candidates.into_iter().zip(computed) {
+        let agent_status = agent_summaries.remove(&c.name);
         entries.push(WorkspaceEntry {
-            is_stale: compute_is_stale(merge_status, modified),
+            name: c.name,
+            path: c.path,
+            last_modified: comp.modified,
+            diff_stat: comp.diff_stat,
+            is_main: c.is_main,
+            change_id: c.info.change_id,
+            description: comp.description,
+            bookmarks: c.info.bookmarks,
+            is_stale: comp.is_stale,
             repo_name: None,
-            name,
-            path,
-            last_modified: modified,
-            diff_stat: stat,
-            is_main: false,
-            change_id: info.change_id,
-            description,
-            bookmarks: info.bookmarks,
             main_repo_path: main_repo.clone(),
             vcs_type,
             agent_status,
@@ -707,6 +740,13 @@ fn compute_is_stale(merged: MergeStatus, last_modified: Option<SystemTime>) -> b
     if merged == MergeStatus::Merged {
         return true;
     }
+    stale_by_mtime(last_modified)
+}
+
+/// `true` if `last_modified` is older than [`STALE_DAYS`]. Used to skip the
+/// VCS-subprocess merged probe when inactivity alone is enough to mark a
+/// workspace stale.
+fn stale_by_mtime(last_modified: Option<SystemTime>) -> bool {
     if let Some(time) = last_modified
         && let Ok(duration) = time.elapsed()
     {
@@ -2262,6 +2302,23 @@ mod tests {
         assert!(!compute_is_stale(MergeStatus::Unmerged, None));
     }
 
+    #[test]
+    fn stale_by_mtime_old_is_true() {
+        let old = SystemTime::now() - std::time::Duration::from_secs(86400 * 31);
+        assert!(stale_by_mtime(Some(old)));
+    }
+
+    #[test]
+    fn stale_by_mtime_recent_is_false() {
+        let recent = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
+        assert!(!stale_by_mtime(Some(recent)));
+    }
+
+    #[test]
+    fn stale_by_mtime_unknown_is_false() {
+        assert!(!stale_by_mtime(None));
+    }
+
     // ── format_time_ago tests ───────────────────────────────────────
 
     #[test]
@@ -2455,7 +2512,7 @@ mod tests {
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
 
-        let backend = crate::git::GitBackend;
+        let backend = crate::git::GitBackend::default();
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
@@ -2493,7 +2550,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let backend = crate::git::GitBackend;
+        let backend = crate::git::GitBackend::default();
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
@@ -2525,7 +2582,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2536,14 +2593,14 @@ mod tests {
             assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             assert!(entries.iter().any(|e| e.name == "test-ws"));
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose)
@@ -2551,7 +2608,7 @@ mod tests {
             assert!(!ws_dir.exists());
 
             let deps4 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps4).unwrap();
@@ -2568,7 +2625,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2589,7 +2646,7 @@ mod tests {
                 .unwrap();
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
@@ -2611,7 +2668,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2622,7 +2679,7 @@ mod tests {
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
@@ -2631,7 +2688,7 @@ mod tests {
             assert!(main_repo.join(".dwm/worktrees/new-name").exists());
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps3).unwrap();
@@ -2650,7 +2707,7 @@ mod tests {
 
         with_data_dir(tmp.path(), || {
             let deps = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
 
@@ -2660,7 +2717,7 @@ mod tests {
             fs::create_dir_all(&subdir).unwrap();
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: subdir,
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
@@ -2980,21 +3037,21 @@ mod tests {
 
         with_data_dir(tmp.path(), || {
             let deps = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
             let ws_dir = main_repo.join(".dwm/worktrees/switch-target");
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
             assert_eq!(path, ws_dir);
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let path = switch_workspace_inner(&deps3, "main-worktree").unwrap();

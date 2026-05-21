@@ -13,7 +13,7 @@ impl VcsType {
     pub fn to_backend(self) -> Box<dyn VcsBackend> {
         match self {
             VcsType::Jj => Box::new(crate::jj::JjBackend),
-            VcsType::Git => Box::new(crate::git::GitBackend),
+            VcsType::Git => Box::new(crate::git::GitBackend::default()),
         }
     }
 
@@ -70,7 +70,10 @@ pub struct DiffStat {
 }
 
 /// Abstraction over jj and git that workspace operations are delegated to.
-pub trait VcsBackend {
+///
+/// `Send + Sync` is required so `list_workspace_entries_inner` can fan out
+/// per-workspace VCS calls across a `std::thread::scope`.
+pub trait VcsBackend: Send + Sync {
     /// Return the repository root given any directory inside the repo.
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
 
@@ -141,7 +144,7 @@ pub fn detect(dir: &Path) -> Result<Box<dyn VcsBackend>> {
             return Ok(Box::new(crate::jj::JjBackend));
         }
         if current.join(".git").exists() {
-            return Ok(Box::new(crate::git::GitBackend));
+            return Ok(Box::new(crate::git::GitBackend::default()));
         }
         if !current.pop() {
             break;
