@@ -13,7 +13,7 @@ impl VcsType {
     pub fn to_backend(self) -> Box<dyn VcsBackend> {
         match self {
             VcsType::Jj => Box::new(crate::jj::JjBackend),
-            VcsType::Git => Box::new(crate::git::GitBackend),
+            VcsType::Git => Box::new(crate::git::GitBackend::default()),
         }
     }
 
@@ -141,7 +141,7 @@ pub fn detect(dir: &Path) -> Result<Box<dyn VcsBackend>> {
             return Ok(Box::new(crate::jj::JjBackend));
         }
         if current.join(".git").exists() {
-            return Ok(Box::new(crate::git::GitBackend));
+            return Ok(Box::new(crate::git::GitBackend::default()));
         }
         if !current.pop() {
             break;

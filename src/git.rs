@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
 
@@ -99,7 +100,19 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
 }
 
 /// [`VcsBackend`] implementation that delegates to the `git` CLI via worktrees.
-pub struct GitBackend;
+#[derive(Default)]
+pub struct GitBackend {
+    /// Memoised trunk branch name. `detect_trunk` runs up to 3 `git` subprocesses,
+    /// and the result is invariant for the lifetime of a single dwm invocation,
+    /// so cache it on the backend instance.
+    trunk_cache: OnceLock<String>,
+}
+
+impl GitBackend {
+    fn trunk(&self, dir: &Path) -> &str {
+        self.trunk_cache.get_or_init(|| detect_trunk(dir))
+    }
+}
 
 impl VcsBackend for GitBackend {
     fn root_from(&self, dir: &Path) -> Result<PathBuf> {
@@ -181,8 +194,7 @@ impl VcsBackend for GitBackend {
         worktree_dir: &Path,
         _ws_name: &str,
     ) -> Result<DiffStat> {
-        let trunk = detect_trunk(worktree_dir);
-        let range = format!("{}..HEAD", trunk);
+        let range = format!("{}..HEAD", self.trunk(worktree_dir));
         match run_git_in(worktree_dir, &["diff", "--stat", &range]) {
             Ok(text) => vcs::parse_diff_stat(&text),
             Err(_) => Ok(DiffStat::default()),
@@ -196,11 +208,15 @@ impl VcsBackend for GitBackend {
     }
 
     fn is_merged_into_trunk(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> bool {
-        let trunk = detect_trunk(worktree_dir);
         // Check if HEAD is an ancestor of trunk (i.e., fully merged)
         run_git_in(
             worktree_dir,
-            &["merge-base", "--is-ancestor", "HEAD", &trunk],
+            &[
+                "merge-base",
+                "--is-ancestor",
+                "HEAD",
+                self.trunk(worktree_dir),
+            ],
         )
         .is_ok()
     }
@@ -229,8 +245,7 @@ impl VcsBackend for GitBackend {
     }
 
     fn preview_diff_stat(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> String {
-        let trunk = detect_trunk(worktree_dir);
-        let range = format!("{}..HEAD", trunk);
+        let range = format!("{}..HEAD", self.trunk(worktree_dir));
         run_git_in(worktree_dir, &["diff", "--stat", &range]).unwrap_or_default()
     }
 }
@@ -313,12 +328,37 @@ branch refs/heads/main
 
     #[test]
     fn git_backend_vcs_type() {
-        assert_eq!(GitBackend.vcs_type(), crate::vcs::VcsType::Git);
+        assert_eq!(GitBackend::default().vcs_type(), crate::vcs::VcsType::Git);
     }
 
     #[test]
     fn git_backend_main_workspace_name() {
-        assert_eq!(GitBackend.main_workspace_name(), "main-worktree");
+        assert_eq!(GitBackend::default().main_workspace_name(), "main-worktree");
+    }
+
+    #[test]
+    fn trunk_cache_populated_after_first_call() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main", dir.path().to_str().unwrap()])
+            .output()
+            .expect("git must be installed to run this test");
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                dir.path().to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .output();
+        let backend = GitBackend::default();
+        assert!(backend.trunk_cache.get().is_none());
+        let trunk1 = backend.trunk(dir.path()).to_string();
+        assert!(backend.trunk_cache.get().is_some());
+        let trunk2 = backend.trunk(dir.path()).to_string();
+        assert_eq!(trunk1, trunk2);
     }
 
     // Integration tests that require a real git repo
@@ -329,7 +369,7 @@ branch refs/heads/main
             .args(["init", dir.path().to_str().unwrap()])
             .output()
             .expect("git must be installed to run this test");
-        let backend = GitBackend;
+        let backend = GitBackend::default();
         let root = backend.root_from(dir.path()).unwrap();
         // Canonicalize both for comparison (handles /private/tmp on macOS)
         let expected = dir.path().canonicalize().unwrap();

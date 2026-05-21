@@ -2455,7 +2455,7 @@ mod tests {
         fs::create_dir_all(&repo_path).unwrap();
         let main_repo = init_git_repo(&repo_path);
 
-        let backend = crate::git::GitBackend;
+        let backend = crate::git::GitBackend::default();
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
@@ -2493,7 +2493,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let backend = crate::git::GitBackend;
+        let backend = crate::git::GitBackend::default();
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
@@ -2525,7 +2525,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2536,14 +2536,14 @@ mod tests {
             assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             assert!(entries.iter().any(|e| e.name == "test-ws"));
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose)
@@ -2551,7 +2551,7 @@ mod tests {
             assert!(!ws_dir.exists());
 
             let deps4 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps4).unwrap();
@@ -2568,7 +2568,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2589,7 +2589,7 @@ mod tests {
                 .unwrap();
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
@@ -2611,7 +2611,7 @@ mod tests {
         let main_repo = init_git_repo(&repo_path);
 
         with_data_dir(tmp.path(), || {
-            let backend = crate::git::GitBackend;
+            let backend = crate::git::GitBackend::default();
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
@@ -2622,7 +2622,7 @@ mod tests {
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
@@ -2631,7 +2631,7 @@ mod tests {
             assert!(main_repo.join(".dwm/worktrees/new-name").exists());
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
             };
             let entries = list_workspace_entries_inner(&deps3).unwrap();
@@ -2650,7 +2650,7 @@ mod tests {
 
         with_data_dir(tmp.path(), || {
             let deps = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
 
@@ -2660,7 +2660,7 @@ mod tests {
             fs::create_dir_all(&subdir).unwrap();
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: subdir,
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
@@ -2980,21 +2980,21 @@ mod tests {
 
         with_data_dir(tmp.path(), || {
             let deps = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
             let ws_dir = main_repo.join(".dwm/worktrees/switch-target");
 
             let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
             assert_eq!(path, ws_dir);
 
             let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::git::GitBackend),
+                backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
             };
             let path = switch_workspace_inner(&deps3, "main-worktree").unwrap();
