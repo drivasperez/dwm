@@ -45,8 +45,11 @@
 //! - `DWM_REPO_ROOT` — absolute path of the original repository root
 //! - `DWM_VCS` — `"jj"` or `"git"`
 //! - `DWM_FROM_WORKSPACE` — the `--from <name>` value, if provided
-//! - `CONDUCTOR_ROOT_PATH` — alias of `DWM_WORKSPACE_PATH`, mirroring
-//!   Conductor's "workspace's repo path" semantic so existing scripts work.
+//! - `CONDUCTOR_ROOT_PATH` — alias of `DWM_REPO_ROOT` (the original repo root).
+//!   Matches Conductor's semantic so scripts like
+//!   `cp $CONDUCTOR_ROOT_PATH/.env.local .env.local` Just Work.
+//! - `CONDUCTOR_WORKSPACE_PATH` — alias of `DWM_WORKSPACE_PATH`
+//! - `CONDUCTOR_WORKSPACE_NAME` — alias of `DWM_WORKSPACE_NAME`
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -192,7 +195,9 @@ pub fn run_setup(hooks: &Hooks, ctx: &HookContext) -> Result<()> {
         .env("DWM_WORKSPACE_NAME", &ctx.workspace_name)
         .env("DWM_REPO_ROOT", &ctx.repo_root)
         .env("DWM_VCS", ctx.vcs_type.to_string())
-        .env("CONDUCTOR_ROOT_PATH", &ctx.workspace_path)
+        .env("CONDUCTOR_ROOT_PATH", &ctx.repo_root)
+        .env("CONDUCTOR_WORKSPACE_PATH", &ctx.workspace_path)
+        .env("CONDUCTOR_WORKSPACE_NAME", &ctx.workspace_name)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -456,23 +461,67 @@ setup = "from-dwm-toml"
     #[test]
     fn run_setup_executes_script_with_env() {
         let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&repo).unwrap();
         let hooks = Hooks {
             setup: Some(
-                "echo \"$DWM_WORKSPACE_NAME|$DWM_VCS|$CONDUCTOR_ROOT_PATH\" > marker".to_string(),
+                "echo \"$DWM_WORKSPACE_NAME|$DWM_VCS|$DWM_WORKSPACE_PATH|$DWM_REPO_ROOT\" > marker"
+                    .to_string(),
             ),
             ..Hooks::default()
         };
         let ctx = HookContext {
-            workspace_path: dir.path().to_path_buf(),
+            workspace_path: workspace.clone(),
             workspace_name: "feature-x".into(),
-            repo_root: dir.path().to_path_buf(),
+            repo_root: repo.clone(),
             vcs_type: VcsType::Git,
             from_workspace: None,
         };
         run_setup(&hooks, &ctx).unwrap();
-        let marker = std::fs::read_to_string(dir.path().join("marker")).unwrap();
+        let marker = std::fs::read_to_string(workspace.join("marker")).unwrap();
         let marker = marker.trim();
-        assert_eq!(marker, format!("feature-x|git|{}", dir.path().display()));
+        assert_eq!(
+            marker,
+            format!("feature-x|git|{}|{}", workspace.display(), repo.display())
+        );
+    }
+
+    #[test]
+    fn run_setup_conductor_root_path_points_at_repo_root_not_workspace() {
+        // Regression: CONDUCTOR_ROOT_PATH was previously aliased to the
+        // workspace path, but Conductor itself defines it as the original
+        // repo root (e.g. so `cp $CONDUCTOR_ROOT_PATH/.env .env` works from
+        // inside a new workspace). Setup scripts written for Conductor would
+        // see both paths equal and silently misbehave.
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        let hooks = Hooks {
+            setup: Some(
+                "echo \"$CONDUCTOR_ROOT_PATH|$CONDUCTOR_WORKSPACE_PATH|$CONDUCTOR_WORKSPACE_NAME\" \
+                 > marker"
+                    .to_string(),
+            ),
+            ..Hooks::default()
+        };
+        let ctx = HookContext {
+            workspace_path: workspace.clone(),
+            workspace_name: "feature-x".into(),
+            repo_root: repo.clone(),
+            vcs_type: VcsType::Git,
+            from_workspace: None,
+        };
+        run_setup(&hooks, &ctx).unwrap();
+        let marker = std::fs::read_to_string(workspace.join("marker")).unwrap();
+        let marker = marker.trim();
+        assert_eq!(
+            marker,
+            format!("{}|{}|feature-x", repo.display(), workspace.display())
+        );
     }
 
     #[test]

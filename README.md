@@ -79,14 +79,16 @@ The script runs as `sh -c "<command>"` with the new workspace as its working dir
 
 The script sees these environment variables:
 
-| Variable              | Value                                               |
-| --------------------- | --------------------------------------------------- |
-| `DWM_WORKSPACE_PATH`  | Absolute path of the new workspace                  |
-| `DWM_WORKSPACE_NAME`  | Workspace name                                      |
-| `DWM_REPO_ROOT`       | Absolute path of the original repo root             |
-| `DWM_VCS`             | `jj` or `git`                                       |
-| `DWM_FROM_WORKSPACE`  | The `--from <name>` value, if provided              |
-| `CONDUCTOR_ROOT_PATH` | Alias of `DWM_WORKSPACE_PATH`, for Conductor compat |
+| Variable                   | Value                                          |
+| -------------------------- | ---------------------------------------------- |
+| `DWM_WORKSPACE_PATH`       | Absolute path of the new workspace             |
+| `DWM_WORKSPACE_NAME`       | Workspace name                                 |
+| `DWM_REPO_ROOT`            | Absolute path of the original repo root        |
+| `DWM_VCS`                  | `jj` or `git`                                  |
+| `DWM_FROM_WORKSPACE`       | The `--from <name>` value, if provided         |
+| `CONDUCTOR_ROOT_PATH`      | Alias of `DWM_REPO_ROOT`, for Conductor compat |
+| `CONDUCTOR_WORKSPACE_PATH` | Alias of `DWM_WORKSPACE_PATH`                  |
+| `CONDUCTOR_WORKSPACE_NAME` | Alias of `DWM_WORKSPACE_NAME`                  |
 
 ## Agent status tracking
 
