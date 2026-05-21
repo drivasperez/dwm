@@ -249,6 +249,30 @@ impl VcsBackend for JjBackend {
         vcs::VcsType::Jj.main_workspace_name()
     }
 
+    fn default_branch_name(&self, repo_root: &Path) -> String {
+        // Try `jj log -r 'trunk()' -T 'bookmarks'` to find the bookmark pointing
+        // at trunk. jj prints a comma-separated list of bookmark names; we keep
+        // the first non-empty one.
+        if let Ok(out) = run_jj_in(
+            repo_root,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                "trunk()",
+                "-T",
+                r#"self.bookmarks().map(|b| b.name()).join(",") ++ "\n""#,
+                "--limit",
+                "1",
+            ],
+        ) && let Some(line) = out.lines().next()
+            && let Some(first) = line.split(',').map(|s| s.trim()).find(|s| !s.is_empty())
+        {
+            return first.to_string();
+        }
+        "main".to_string()
+    }
+
     fn preview_log(
         &self,
         repo_dir: &Path,

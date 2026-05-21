@@ -5,6 +5,7 @@ mod hooks;
 #[allow(dead_code)]
 mod jj;
 mod names;
+mod ports;
 mod shell;
 mod tui;
 mod vcs;
@@ -63,6 +64,7 @@ fn main() -> Result<()> {
         Commands::Delete { name } => {
             workspace::delete_workspace(name, workspace::DeleteOutput::Verbose).map(|_| ())
         }
+        Commands::Run => workspace::run_workspace_command(),
         Commands::HookHandler => agent::handle_hook(),
         Commands::AgentSetup => agent::setup_agent_hooks(),
         Commands::Setup => {

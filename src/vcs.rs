@@ -118,6 +118,12 @@ pub trait VcsBackend {
     /// (e.g. `"default"` for jj, `"main-worktree"` for git).
     fn main_workspace_name(&self) -> &'static str;
 
+    /// Best-effort name of the repository's default/trunk branch (e.g. `main`,
+    /// `master`, `trunk`). Returns `"main"` when detection fails.
+    fn default_branch_name(&self, _repo_root: &Path) -> String {
+        "main".to_string()
+    }
+
     fn preview_log(
         &self,
         _repo_dir: &Path,
