@@ -8,7 +8,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::vcs;
+use crate::vcs::VcsType;
+use crate::workspace;
 
 /// How long before a status file is considered stale and ignored.
 const STALE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -73,9 +74,9 @@ impl fmt::Display for AgentSummary {
     }
 }
 
-/// Return the `.agent-status` directory for a repo.
+/// Return the `agent-status` directory inside a per-repo `.dwm/` dir.
 fn agent_status_dir(repo_dir: &Path) -> PathBuf {
-    repo_dir.join(".agent-status")
+    repo_dir.join("agent-status")
 }
 
 /// Convert a unix timestamp to a [`SystemTime`].
@@ -200,45 +201,44 @@ pub fn remove_agent_statuses_for_workspace(repo_dir: &Path, workspace: &str) {
 // Hook handler
 // ---------------------------------------------------------------------------
 
-/// Resolve a `cwd` path to `(repo_dir, workspace_name)` using only the
+/// Resolve a `cwd` path to `(agent_status_dir, workspace_name)` using only the
 /// filesystem — no VCS subprocess calls.
 ///
 /// Returns `None` if the path doesn't correspond to a dwm-managed workspace.
-fn resolve_workspace_from_cwd(dwm_base: &Path, cwd: &Path) -> Option<(PathBuf, String)> {
-    // Case 1: cwd is under ~/.dwm/<repo>/<workspace>/...
-    if let Ok(relative) = cwd.strip_prefix(dwm_base) {
-        let mut components = relative.components();
-        let repo_name = components.next()?.as_os_str().to_string_lossy().to_string();
-        let ws_name = components.next()?.as_os_str().to_string_lossy().to_string();
-        let repo_dir = dwm_base.join(&repo_name);
-        return Some((repo_dir, ws_name));
+///
+/// The returned `agent_status_dir` is the per-repo `.dwm/` directory (which is
+/// the directory the agent-status JSON files live under, in `agent-status/`).
+fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
+    // Case 1: cwd is inside a dwm workspace under <root>/.dwm/worktrees/<ws>/...
+    if let Some((root, ws_name, _ws_path)) = workspace::find_dwm_workspace(cwd) {
+        return Some((root.join(".dwm"), ws_name));
     }
 
-    // Case 2: cwd is under a main repo tracked by dwm.
-    // Scan all ~/.dwm/*/.main-repo files to find a match.
-    let entries = fs::read_dir(dwm_base).ok()?;
-    for entry in entries.flatten() {
-        let repo_path = entry.path();
-        if !repo_path.is_dir() {
-            continue;
-        }
-        let main_repo_file = repo_path.join(".main-repo");
-        let main_repo_str = match fs::read_to_string(&main_repo_file) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let main_repo = PathBuf::from(main_repo_str.trim());
-        if cwd.starts_with(&main_repo) {
-            // Determine the main workspace name from the VCS type
-            let ws_name = match vcs::read_vcs_type(&repo_path) {
-                Ok(vcs::VcsType::Jj) => "default",
-                Ok(vcs::VcsType::Git) => "main-worktree",
-                Err(_) => "default",
+    // Case 2: cwd is somewhere inside a repo root that has a .dwm/ dir.
+    // Walk up looking for a directory that has BOTH a VCS marker and a `.dwm/`
+    // subdirectory. That's the main repo for a dwm-managed clone.
+    let mut current = cwd.to_path_buf();
+    loop {
+        let dwm = current.join(".dwm");
+        if dwm.is_dir() {
+            // Determine main workspace name from VCS type.
+            let ws_name = if current.join(".jj").is_dir() {
+                VcsType::Jj.main_workspace_name()
+            } else if current.join(".git").exists() {
+                VcsType::Git.main_workspace_name()
+            } else {
+                // No VCS marker here; keep walking up.
+                if !current.pop() {
+                    return None;
+                }
+                continue;
             };
-            return Some((repo_path, ws_name.to_string()));
+            return Some((dwm, ws_name.to_string()));
+        }
+        if !current.pop() {
+            break;
         }
     }
-
     None
 }
 
@@ -264,11 +264,8 @@ pub fn handle_hook() -> Result<()> {
         return Ok(()); // silently ignore incomplete data
     }
 
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    let dwm_base = home.join(".dwm");
-
     let cwd = PathBuf::from(cwd_str);
-    let (repo_dir, ws_name) = match resolve_workspace_from_cwd(&dwm_base, &cwd) {
+    let (repo_dir, ws_name) = match resolve_workspace_from_cwd(&cwd) {
         Some(r) => r,
         None => return Ok(()), // not a dwm workspace, silently ignore
     };
@@ -495,7 +492,7 @@ mod tests {
         status: &str,
         updated_at: u64,
     ) {
-        let agent_dir = dir.join(".agent-status");
+        let agent_dir = dir.join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         let content = format!(
             r#"{{"workspace":"{}","status":"{}","updated_at":{}}}"#,
@@ -660,75 +657,86 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cwd_inside_dwm() {
-        let dwm_base = PathBuf::from("/home/user/.dwm");
-        let cwd = PathBuf::from("/home/user/.dwm/myrepo-abc123/my-feature/src");
+    fn resolve_cwd_inside_dwm_workspace() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        let ws = repo.join(".dwm/worktrees/my-feature");
+        fs::create_dir_all(ws.join("src")).unwrap();
 
-        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
+        let result = resolve_workspace_from_cwd(&ws.join("src"));
         assert!(result.is_some());
-        let (repo_dir, ws_name) = result.unwrap();
-        assert_eq!(repo_dir, PathBuf::from("/home/user/.dwm/myrepo-abc123"));
+        let (agent_dir, ws_name) = result.unwrap();
+        assert_eq!(agent_dir, repo.join(".dwm"));
         assert_eq!(ws_name, "my-feature");
     }
 
     #[test]
-    fn resolve_cwd_outside_dwm_no_match() {
+    fn resolve_cwd_outside_no_match() {
         let dir = TempDir::new().unwrap();
-        let dwm_base = dir.path().join(".dwm");
-        fs::create_dir_all(&dwm_base).unwrap();
-
-        let cwd = PathBuf::from("/some/random/dir");
-        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
+        // Random dir without VCS metadata.
+        let result = resolve_workspace_from_cwd(dir.path());
         assert!(result.is_none());
     }
 
     #[test]
-    fn resolve_cwd_main_repo() {
+    fn resolve_cwd_main_repo_git() {
         let dir = TempDir::new().unwrap();
-        let dwm_base = dir.path().join(".dwm");
-        let repo_dir = dwm_base.join("myrepo-abc123");
-        fs::create_dir_all(&repo_dir).unwrap();
-
-        let main_repo = dir.path().join("repos").join("myrepo");
-        fs::create_dir_all(&main_repo).unwrap();
-        fs::write(
-            repo_dir.join(".main-repo"),
-            main_repo.to_string_lossy().as_ref(),
-        )
-        .unwrap();
-        fs::write(repo_dir.join(".vcs-type"), "git").unwrap();
-
-        let cwd = main_repo.join("src");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join(".dwm")).unwrap();
+        let cwd = repo.join("src");
         fs::create_dir_all(&cwd).unwrap();
 
-        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
-        assert!(result.is_some());
-        let (resolved_repo, ws_name) = result.unwrap();
-        assert_eq!(resolved_repo, repo_dir);
+        let result = resolve_workspace_from_cwd(&cwd);
+        let (agent_dir, ws_name) = result.unwrap();
+        assert_eq!(agent_dir, repo.join(".dwm"));
         assert_eq!(ws_name, "main-worktree");
+    }
+
+    #[test]
+    fn resolve_cwd_main_repo_jj() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        fs::create_dir_all(repo.join(".dwm")).unwrap();
+        let cwd = repo.join("src");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let result = resolve_workspace_from_cwd(&cwd);
+        let (_agent_dir, ws_name) = result.unwrap();
+        assert_eq!(ws_name, "default");
+    }
+
+    #[test]
+    fn resolve_cwd_main_repo_no_dwm_dir_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        // No .dwm/ → not a dwm-managed repo.
+        let result = resolve_workspace_from_cwd(&repo);
+        assert!(result.is_none());
     }
 
     #[test]
     fn hook_handler_parse_pre_tool_use() {
         let dir = TempDir::new().unwrap();
-        let dwm_base = dir.path().join(".dwm");
-        let repo_dir = dwm_base.join("myrepo-abc123");
-        fs::create_dir_all(&repo_dir).unwrap();
-
-        let ws_dir = repo_dir.join("my-feature");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        let ws_dir = repo.join(".dwm/worktrees/my-feature");
         fs::create_dir_all(&ws_dir).unwrap();
 
-        let (repo, ws) = resolve_workspace_from_cwd(&dwm_base, &PathBuf::from(ws_dir)).unwrap();
-        write_agent_status(&repo, "test-sess", &ws, AgentStatus::Working).unwrap();
+        let (agent_dir, ws) = resolve_workspace_from_cwd(&ws_dir).unwrap();
+        write_agent_status(&agent_dir, "test-sess", &ws, AgentStatus::Working).unwrap();
 
-        let map = read_agent_summaries(&repo);
+        let map = read_agent_summaries(&agent_dir);
         assert_eq!(map.get("my-feature").unwrap().working, 1);
     }
 
     #[test]
     fn malformed_json_files_ignored() {
         let dir = TempDir::new().unwrap();
-        let agent_dir = dir.path().join(".agent-status");
+        let agent_dir = dir.path().join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(agent_dir.join("bad.json"), "not valid json").unwrap();
 
@@ -739,7 +747,7 @@ mod tests {
     #[test]
     fn non_json_files_ignored() {
         let dir = TempDir::new().unwrap();
-        let agent_dir = dir.path().join(".agent-status");
+        let agent_dir = dir.path().join("agent-status");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(agent_dir.join("readme.txt"), "hello").unwrap();
 
@@ -889,54 +897,6 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Setup)));
     }
 
-    // --- Gap: resolve_workspace_from_cwd with jj VcsType ---
-
-    #[test]
-    fn resolve_cwd_main_repo_jj() {
-        let dir = TempDir::new().unwrap();
-        let dwm_base = dir.path().join(".dwm");
-        let repo_dir = dwm_base.join("myrepo-abc123");
-        fs::create_dir_all(&repo_dir).unwrap();
-
-        let main_repo = dir.path().join("repos").join("myrepo");
-        fs::create_dir_all(&main_repo).unwrap();
-        fs::write(
-            repo_dir.join(".main-repo"),
-            main_repo.to_string_lossy().as_ref(),
-        )
-        .unwrap();
-        fs::write(repo_dir.join(".vcs-type"), "jj").unwrap();
-
-        let cwd = main_repo.join("src");
-        fs::create_dir_all(&cwd).unwrap();
-
-        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
-        let (resolved_repo, ws_name) = result.unwrap();
-        assert_eq!(resolved_repo, repo_dir);
-        assert_eq!(ws_name, "default");
-    }
-
-    #[test]
-    fn resolve_cwd_main_repo_no_vcs_type_defaults_to_jj() {
-        let dir = TempDir::new().unwrap();
-        let dwm_base = dir.path().join(".dwm");
-        let repo_dir = dwm_base.join("myrepo-abc123");
-        fs::create_dir_all(&repo_dir).unwrap();
-
-        let main_repo = dir.path().join("repos").join("myrepo");
-        fs::create_dir_all(&main_repo).unwrap();
-        fs::write(
-            repo_dir.join(".main-repo"),
-            main_repo.to_string_lossy().as_ref(),
-        )
-        .unwrap();
-        // No .vcs-type file — should default to jj ("default")
-
-        let result = resolve_workspace_from_cwd(&dwm_base, &main_repo);
-        let (_resolved_repo, ws_name) = result.unwrap();
-        assert_eq!(ws_name, "default");
-    }
-
     // --- Gap: stale boundary condition (exactly at threshold) ---
 
     #[test]
@@ -960,21 +920,6 @@ mod tests {
         // No status file exists; should not error
         let result = remove_agent_status(dir.path(), "nonexistent-session");
         assert!(result.is_ok());
-    }
-
-    // --- Gap: handle_hook silently ignores missing session_id/cwd ---
-
-    #[test]
-    fn resolve_cwd_dwm_base_only_returns_none() {
-        // cwd is exactly the dwm_base with only one path component (repo name, no workspace)
-        let dwm_base = PathBuf::from("/home/user/.dwm");
-        let cwd = PathBuf::from("/home/user/.dwm/myrepo-abc123");
-
-        let result = resolve_workspace_from_cwd(&dwm_base, &cwd);
-        assert!(
-            result.is_none(),
-            "should need both repo and workspace components"
-        );
     }
 
     // --- Gap: AgentStatus serde roundtrip ---

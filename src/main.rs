@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod git;
+mod hooks;
 #[allow(dead_code)]
 mod jj;
 mod names;

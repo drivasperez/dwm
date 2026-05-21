@@ -210,7 +210,7 @@ impl VcsBackend for GitBackend {
     }
 
     fn main_workspace_name(&self) -> &'static str {
-        "main-worktree"
+        vcs::VcsType::Git.main_workspace_name()
     }
 
     fn preview_log(
