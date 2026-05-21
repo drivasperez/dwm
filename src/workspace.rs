@@ -689,7 +689,7 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     });
 
     let mut entries = Vec::with_capacity(candidates.len());
-    for (c, comp) in candidates.into_iter().zip(computed.into_iter()) {
+    for (c, comp) in candidates.into_iter().zip(computed) {
         let agent_status = agent_summaries.remove(&c.name);
         entries.push(WorkspaceEntry {
             name: c.name,

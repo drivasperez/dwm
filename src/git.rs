@@ -138,9 +138,6 @@ impl VcsBackend for GitBackend {
                 wt.head.clone()
             };
 
-            // Description is populated lazily by list_workspace_entries_inner
-            // via latest_description (which runs the same `git log -1`), so we
-            // skip it here to avoid paying for the same data twice.
             let bookmarks: Vec<String> = wt.branch.into_iter().collect();
 
             results.push((
