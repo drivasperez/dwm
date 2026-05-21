@@ -661,6 +661,10 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
 
                     let is_stale = if c.is_main {
                         false
+                    } else if stale_by_mtime(modified) {
+                        // Already stale by inactivity — skip the merged probe,
+                        // which is a VCS subprocess we don't need.
+                        true
                     } else {
                         let merge_status = if c.has_info
                             && backend.is_merged_into_trunk(main_repo_ref, &c.path, &c.name)
@@ -736,6 +740,13 @@ fn compute_is_stale(merged: MergeStatus, last_modified: Option<SystemTime>) -> b
     if merged == MergeStatus::Merged {
         return true;
     }
+    stale_by_mtime(last_modified)
+}
+
+/// `true` if `last_modified` is older than [`STALE_DAYS`]. Used to skip the
+/// VCS-subprocess merged probe when inactivity alone is enough to mark a
+/// workspace stale.
+fn stale_by_mtime(last_modified: Option<SystemTime>) -> bool {
     if let Some(time) = last_modified
         && let Ok(duration) = time.elapsed()
     {
@@ -2289,6 +2300,23 @@ mod tests {
     #[test]
     fn stale_unknown_time_not_merged_is_not_stale() {
         assert!(!compute_is_stale(MergeStatus::Unmerged, None));
+    }
+
+    #[test]
+    fn stale_by_mtime_old_is_true() {
+        let old = SystemTime::now() - std::time::Duration::from_secs(86400 * 31);
+        assert!(stale_by_mtime(Some(old)));
+    }
+
+    #[test]
+    fn stale_by_mtime_recent_is_false() {
+        let recent = SystemTime::now() - std::time::Duration::from_secs(86400 * 5);
+        assert!(!stale_by_mtime(Some(recent)));
+    }
+
+    #[test]
+    fn stale_by_mtime_unknown_is_false() {
+        assert!(!stale_by_mtime(None));
     }
 
     // ── format_time_ago tests ───────────────────────────────────────
