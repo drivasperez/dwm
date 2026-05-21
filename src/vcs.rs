@@ -70,7 +70,10 @@ pub struct DiffStat {
 }
 
 /// Abstraction over jj and git that workspace operations are delegated to.
-pub trait VcsBackend {
+///
+/// `Send + Sync` is required so `list_workspace_entries_inner` can fan out
+/// per-workspace VCS calls across a `std::thread::scope`.
+pub trait VcsBackend: Send + Sync {
     /// Return the repository root given any directory inside the repo.
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
 

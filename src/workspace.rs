@@ -562,6 +562,23 @@ pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     list_workspace_entries_inner(&deps)
 }
 
+/// Inputs for the per-workspace fan-out in [`list_workspace_entries_inner`].
+struct EntryCandidate {
+    name: String,
+    path: PathBuf,
+    is_main: bool,
+    info: vcs::WorkspaceInfo,
+    has_info: bool,
+}
+
+/// Per-workspace fields computed in parallel via VCS calls.
+struct ComputedEntry {
+    diff_stat: vcs::DiffStat,
+    description: String,
+    modified: Option<SystemTime>,
+    is_stale: bool,
+}
+
 /// Testable core of [`list_workspace_entries`].
 fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEntry>> {
     let main_repo = resolve_repo_root(deps)?;
@@ -571,104 +588,116 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
 
     let main_ws_name = deps.backend.main_workspace_name();
     let vcs_workspaces = deps.backend.workspace_list(&main_repo).unwrap_or_default();
+    let vcs_type = deps.backend.vcs_type();
 
-    let mut entries = Vec::new();
+    // Collect candidates in display order: main first, then each subdir of
+    // .dwm/worktrees/ (in fs::read_dir order, matching previous behaviour).
+    let mut candidates: Vec<EntryCandidate> = Vec::new();
 
-    // Find info for the main workspace
     let main_info = vcs_workspaces
         .iter()
         .find(|(n, _)| n == main_ws_name)
-        .map(|(_, info)| info.clone())
-        .unwrap_or_default();
-
-    let main_stat = deps
-        .backend
-        .diff_stat_vs_trunk(&main_repo, &main_repo, main_ws_name)
-        .unwrap_or_default();
-    let main_modified = fs::metadata(&main_repo).and_then(|m| m.modified()).ok();
-    let main_description = if main_info.description.trim().is_empty() {
-        deps.backend
-            .latest_description(&main_repo, &main_repo, main_ws_name)
-    } else {
-        main_info.description.clone()
-    };
-    let vcs_type = deps.backend.vcs_type();
-    entries.push(WorkspaceEntry {
+        .map(|(_, info)| info.clone());
+    candidates.push(EntryCandidate {
         name: main_ws_name.to_string(),
         path: main_repo.clone(),
-        last_modified: main_modified,
-        diff_stat: main_stat,
         is_main: true,
-        change_id: main_info.change_id.clone(),
-        description: main_description,
-        bookmarks: main_info.bookmarks.clone(),
-        is_stale: false,
-        repo_name: None,
-        main_repo_path: main_repo.clone(),
-        vcs_type,
-        agent_status: agent_summaries.remove(main_ws_name),
+        has_info: main_info.is_some(),
+        info: main_info.unwrap_or_default(),
     });
 
     let worktrees = worktrees_dir(&main_repo);
-    if !worktrees.exists() {
-        return Ok(entries);
+    if worktrees.exists() {
+        // Scan workspace dirs under .dwm/worktrees/. Internal dwm state lives
+        // in sibling dirs (e.g. .dwm/agent-status/) so there's no need to
+        // filter entries here — every dir under worktrees/ is a workspace.
+        for entry in fs::read_dir(&worktrees)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let info = vcs_workspaces
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, info)| info.clone());
+            candidates.push(EntryCandidate {
+                name,
+                path,
+                is_main: false,
+                has_info: info.is_some(),
+                info: info.unwrap_or_default(),
+            });
+        }
     }
 
-    // Scan workspace dirs under .dwm/worktrees/. Internal dwm state lives in
-    // sibling dirs (e.g. .dwm/agent-status/) so there's no need to filter
-    // entries here — every dir under worktrees/ is a workspace.
-    let read_dir = fs::read_dir(&worktrees)?;
-    for entry in read_dir {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        let ws_info = vcs_workspaces
+    // Fan out the per-workspace VCS calls. Each candidate runs up to 3 cold
+    // subprocesses (diff_stat_vs_trunk, optional latest_description,
+    // is_merged_into_trunk); these are independent across workspaces and dwarf
+    // the cost of spawning an OS thread per workspace.
+    let backend: &dyn vcs::VcsBackend = &*deps.backend;
+    let main_repo_ref: &Path = &main_repo;
+    let computed: Vec<ComputedEntry> = std::thread::scope(|s| {
+        let handles: Vec<_> = candidates
             .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, info)| info.clone());
+            .map(|c| {
+                s.spawn(move || {
+                    let modified = fs::metadata(&c.path).and_then(|m| m.modified()).ok();
 
-        let has_info = ws_info.is_some();
-        let info = ws_info.unwrap_or_default();
+                    let diff_stat = if c.is_main || c.has_info {
+                        backend
+                            .diff_stat_vs_trunk(main_repo_ref, &c.path, &c.name)
+                            .unwrap_or_default()
+                    } else {
+                        vcs::DiffStat::default()
+                    };
 
-        let stat = if has_info {
-            deps.backend
-                .diff_stat_vs_trunk(&main_repo, &path, &name)
-                .unwrap_or_default()
-        } else {
-            vcs::DiffStat::default()
-        };
+                    let description = if c.info.description.trim().is_empty() {
+                        backend.latest_description(main_repo_ref, &c.path, &c.name)
+                    } else {
+                        c.info.description.clone()
+                    };
 
-        let description = if info.description.trim().is_empty() {
-            deps.backend.latest_description(&main_repo, &path, &name)
-        } else {
-            info.description.clone()
-        };
+                    let is_stale = if c.is_main {
+                        false
+                    } else {
+                        let merge_status = if c.has_info
+                            && backend.is_merged_into_trunk(main_repo_ref, &c.path, &c.name)
+                        {
+                            MergeStatus::Merged
+                        } else {
+                            MergeStatus::Unmerged
+                        };
+                        compute_is_stale(merge_status, modified)
+                    };
 
-        let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    ComputedEntry {
+                        diff_stat,
+                        description,
+                        modified,
+                        is_stale,
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
-        let merge_status =
-            if has_info && deps.backend.is_merged_into_trunk(&main_repo, &path, &name) {
-                MergeStatus::Merged
-            } else {
-                MergeStatus::Unmerged
-            };
-
-        let agent_status = agent_summaries.remove(&name);
+    let mut entries = Vec::with_capacity(candidates.len());
+    for (c, comp) in candidates.into_iter().zip(computed.into_iter()) {
+        let agent_status = agent_summaries.remove(&c.name);
         entries.push(WorkspaceEntry {
-            is_stale: compute_is_stale(merge_status, modified),
+            name: c.name,
+            path: c.path,
+            last_modified: comp.modified,
+            diff_stat: comp.diff_stat,
+            is_main: c.is_main,
+            change_id: c.info.change_id,
+            description: comp.description,
+            bookmarks: c.info.bookmarks,
+            is_stale: comp.is_stale,
             repo_name: None,
-            name,
-            path,
-            last_modified: modified,
-            diff_stat: stat,
-            is_main: false,
-            change_id: info.change_id,
-            description,
-            bookmarks: info.bookmarks,
             main_repo_path: main_repo.clone(),
             vcs_type,
             agent_status,
