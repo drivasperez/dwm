@@ -138,17 +138,16 @@ impl VcsBackend for GitBackend {
                 wt.head.clone()
             };
 
-            let description = run_git_in(&wt.path, &["log", "--format=%s", "-1"])
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-
+            // Description is populated lazily by list_workspace_entries_inner
+            // via latest_description (which runs the same `git log -1`), so we
+            // skip it here to avoid paying for the same data twice.
             let bookmarks: Vec<String> = wt.branch.into_iter().collect();
 
             results.push((
                 name,
                 WorkspaceInfo {
                     change_id: short_hash,
-                    description,
+                    description: String::new(),
                     bookmarks,
                 },
             ));
