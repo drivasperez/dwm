@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{agent, hooks, names, vcs};
+use crate::{agent, hooks, names, vcs, zellij};
 
 /// Whether a workspace's changes have been merged into trunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +353,24 @@ fn new_workspace_inner(
     };
     hooks::run_setup(&loaded_hooks, &hook_ctx)?;
 
+    // If we're inside a zellij session, spawn a fresh tab for this workspace.
+    // When that succeeds the user is already "in" the new workspace via the
+    // tab, so we deliberately suppress the stdout `cd` path: emitting it
+    // would cause the shell wrapper in the *original* pane to also cd, which
+    // is surprising. When zellij is unset or the spawn fails, fall through
+    // and print the path as usual.
+    if let Some(mux) = zellij::detect() {
+        use crate::zellij::Multiplexer;
+        if mux.open_workspace_tab(&ws_name, &ws_path) {
+            return Ok(());
+        }
+        eprintln!(
+            "{} could not open zellij tab for '{}'; cd will happen in the current pane",
+            "warning:".yellow(),
+            ws_name
+        );
+    }
+
     // stdout: path for shell wrapper to cd into
     println!("{}", ws_path.display());
     Ok(())
@@ -514,11 +532,25 @@ pub fn run_workspace_command() -> Result<()> {
 
 /// Switch to the named workspace by printing its path to stdout for the shell
 /// wrapper to `cd` into.
+///
+/// When `$ZELLIJ` is set we instead try to focus an existing tab named `name`
+/// (or one whose name has been decorated with a trailing status glyph), and
+/// fall back to spawning a new tab if no such tab exists. In that case we
+/// **do not** print the path to stdout — focus has already been moved by
+/// zellij and printing the path would cause the shell wrapper in the source
+/// pane to cd as well.
 pub fn switch_workspace(name: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
     let path = switch_workspace_inner(&deps, name)?;
+
+    if let Some(mux) = zellij::detect()
+        && zellij::switch_or_open_tab(&mux, name, &path)
+    {
+        return Ok(());
+    }
+
     println!("{}", path.display());
     Ok(())
 }
