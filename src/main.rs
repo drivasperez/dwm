@@ -32,8 +32,7 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            let repo_dir = workspace::current_repo_dir()?;
-            let entries = workspace::list_workspace_entries()?;
+            let (entries, repo_dir) = workspace::list_workspace_entries_and_dwm_dir()?;
             match tui::run_picker(
                 entries,
                 repo_dir,

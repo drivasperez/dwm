@@ -542,24 +542,29 @@ fn rename_workspace_inner(
     }
 }
 
-/// Return the per-repo `.dwm/` directory for the current working directory.
-pub fn current_repo_dir() -> Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
-    if let Some((root, _, _)) = find_dwm_workspace(&cwd) {
-        return Ok(dwm_dir(&root));
-    }
-    let backend = vcs::detect(&cwd)?;
-    let root = backend.root_from(&cwd)?;
-    Ok(dwm_dir(&root))
-}
-
 /// Collect [`WorkspaceEntry`] values for all workspaces belonging to the
 /// repository that contains the current directory.
 pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
+    Ok(list_workspace_entries_and_dwm_dir()?.0)
+}
+
+/// Like [`list_workspace_entries`], but also returns the repo's `.dwm/`
+/// directory.
+///
+/// Callers that need both (e.g. `dwm list`, which polls agent status out of
+/// `.dwm/`) should use this rather than resolving the repo root separately:
+/// the root is already known from the listing, so looking it up again costs a
+/// redundant `jj root` / `git rev-parse` subprocess.
+pub fn list_workspace_entries_and_dwm_dir() -> Result<(Vec<WorkspaceEntry>, PathBuf)> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
     let deps = WorkspaceDeps { backend, cwd };
-    list_workspace_entries_inner(&deps)
+    let entries = list_workspace_entries_inner(&deps)?;
+    let dwm = match entries.first() {
+        Some(entry) => dwm_dir(&entry.main_repo_path),
+        None => dwm_dir(&resolve_repo_root(&deps)?),
+    };
+    Ok((entries, dwm))
 }
 
 /// Inputs for the per-workspace fan-out in [`list_workspace_entries_inner`].
@@ -2945,6 +2950,80 @@ mod tests {
             assert!(
                 feat.diff_stat.insertions > 0 || feat.diff_stat.files_changed > 0,
                 "feature workspace should show changes vs trunk: {:?}",
+                feat.diff_stat
+            );
+        });
+    }
+
+    /// Regression: the workspace diff was taken from `trunk()` itself, so a
+    /// workspace that had simply not been rebased reported every change that
+    /// landed on trunk since it branched (inverted) on top of its own.
+    #[test]
+    fn e2e_jj_diff_stat_ignores_trunk_advancing() {
+        assert!(jj_available(), "jj must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repos/myrepo");
+        fs::create_dir_all(&repo_path).unwrap();
+        let main_repo = init_jj_repo(&repo_path);
+        let main_str = main_repo.to_str().unwrap().to_string();
+
+        let jj = |dir: &str, args: &[&str]| {
+            let mut full = vec!["--repository", dir];
+            full.extend_from_slice(args);
+            let out = std::process::Command::new("jj")
+                .args(&full)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "jj {:?} failed: {:?}", args, out);
+        };
+
+        // Without a remote, the default `trunk()` resolves to the root commit,
+        // which hides the difference this test is about. Point it at the local
+        // `main` bookmark instead.
+        jj(
+            &main_str,
+            &[
+                "config",
+                "set",
+                "--repo",
+                "revset-aliases.\"trunk()\"",
+                "main",
+            ],
+        );
+
+        with_data_dir(tmp.path(), || {
+            let deps = WorkspaceDeps {
+                backend: Box::new(crate::jj::JjBackend),
+                cwd: main_repo.clone(),
+            };
+            new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
+            let ws_dir = main_repo.join(".dwm/worktrees/feature");
+            let ws_str = ws_dir.to_str().unwrap().to_string();
+
+            // One line of work in the workspace.
+            fs::write(ws_dir.join("hello.txt"), "hello\n").unwrap();
+            jj(&ws_str, &["describe", "-m", "add hello"]);
+
+            // Trunk moves on afterwards, touching files the workspace never saw.
+            fs::write(main_repo.join("trunk-a.txt"), "one\ntwo\nthree\n").unwrap();
+            fs::write(main_repo.join("trunk-b.txt"), "four\nfive\n").unwrap();
+            jj(&main_str, &["describe", "-m", "trunk work"]);
+            jj(&main_str, &["bookmark", "set", "main", "-r", "@"]);
+
+            let deps2 = WorkspaceDeps {
+                backend: Box::new(crate::jj::JjBackend),
+                cwd: main_repo.clone(),
+            };
+            let entries = list_workspace_entries_inner(&deps2).unwrap();
+            let feat = entries.iter().find(|e| e.name == "feature").unwrap();
+            assert_eq!(
+                (
+                    feat.diff_stat.files_changed,
+                    feat.diff_stat.insertions,
+                    feat.diff_stat.deletions
+                ),
+                (1, 1, 0),
+                "workspace should report only its own change, got {:?}",
                 feat.diff_stat
             );
         });

@@ -30,6 +30,9 @@ impl StopSignal {
     }
 
     fn stop(&self) {
+        // Hold the mutex while flagging so a sleeper that is between its flag
+        // check and its `wait_timeout` cannot miss the notification.
+        let _guard = self.mutex.lock().unwrap();
         self.flag.store(true, Ordering::Relaxed);
         self.condvar.notify_all();
     }
@@ -38,16 +41,23 @@ impl StopSignal {
         self.flag.load(Ordering::Relaxed)
     }
 
-    /// Sleep for up to `duration`, but wake immediately if stopped.
+    /// Sleep for up to `duration`, but wake immediately if stopped. Returns
+    /// straight away when the signal already fired before the call.
     fn sleep(&self, duration: std::time::Duration) {
         let guard = self.mutex.lock().unwrap();
-        let _ = self.condvar.wait_timeout(guard, duration);
+        let _ = self
+            .condvar
+            .wait_timeout_while(guard, duration, |_| !self.flag.load(Ordering::Relaxed));
     }
 }
 
 /// Spawn a background thread that periodically calls `produce` and posts
-/// results to `sender`. Polls immediately on start, then sleeps for `interval`
-/// between calls. Wakes instantly when the stop signal fires.
+/// results to `sender`. Wakes instantly when the stop signal fires.
+///
+/// The first call happens after `interval`, not immediately: the picker is
+/// opened with a freshly built entry list, so polling on start would repeat
+/// that whole (subprocess-heavy) listing while the user is still looking at
+/// the first frame.
 fn spawn_refresh_thread<T: Send + 'static>(
     interval: std::time::Duration,
     stop: Arc<StopSignal>,
@@ -56,13 +66,13 @@ fn spawn_refresh_thread<T: Send + 'static>(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         loop {
+            stop.sleep(interval);
             if stop.is_stopped() {
                 break;
             }
             if let Some(value) = produce() {
                 let _ = sender.lock().map(|mut m| *m = Some(value));
             }
-            stop.sleep(interval);
         }
     })
 }
