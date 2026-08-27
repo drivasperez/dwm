@@ -4,6 +4,24 @@ use std::process::Command;
 
 use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
 
+/// Global flag that turns a `jj` invocation into a pure read of the repo.
+///
+/// Without it, *every* `jj` command first snapshots the working copy of the
+/// workspace it runs in and writes a new operation to the op log, taking the
+/// repo lock to do so. In a large repo that snapshot walks the whole working
+/// tree, and the lock serialises the per-workspace calls dwm fans out in
+/// parallel. Listing a repo needs at most one snapshot (see
+/// [`VcsBackend::workspace_list`]), so every other query skips it.
+const IGNORE_WC: &str = "--ignore-working-copy";
+
+/// Prepend [`IGNORE_WC`] to `args`, for read-only queries.
+fn read_only_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push(IGNORE_WC);
+    full.extend_from_slice(args);
+    full
+}
+
 /// Run `jj` with the given arguments in the current working directory.
 fn run_jj(args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
@@ -15,6 +33,11 @@ fn run_jj(args: &[&str]) -> Result<String> {
         bail!("jj {} failed: {}", args.join(" "), stderr.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run a read-only `jj` query in the current working directory.
+fn run_jj_ro(args: &[&str]) -> Result<String> {
+    run_jj(&read_only_args(args))
 }
 
 /// Run `jj` with the given arguments inside `dir`.
@@ -31,15 +54,20 @@ fn run_jj_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Run a read-only `jj` query inside `dir`.
+fn run_jj_ro_in(dir: &Path, args: &[&str]) -> Result<String> {
+    run_jj_in(dir, &read_only_args(args))
+}
+
 /// Return the jj repository root from the current working directory.
 pub fn root() -> Result<PathBuf> {
-    let out = run_jj(&["root"])?;
+    let out = run_jj_ro(&["root"])?;
     Ok(PathBuf::from(out.trim()))
 }
 
 /// Return the jj repository root by running `jj root` inside `dir`.
 pub fn root_from(dir: &Path) -> Result<PathBuf> {
-    let out = run_jj_in(dir, &["root"])?;
+    let out = run_jj_ro_in(dir, &["root"])?;
     Ok(PathBuf::from(out.trim()))
 }
 
@@ -111,13 +139,23 @@ fn revset_ws(name: &str) -> String {
     }
 }
 
+/// Revset naming the revision a workspace is currently on. The main workspace
+/// is addressed as `@` so that queries work from any directory in the repo.
+fn workspace_revision(ws_name: &str) -> String {
+    if ws_name == vcs::VcsType::Jj.main_workspace_name() {
+        "@".to_string()
+    } else {
+        revset_ws(ws_name)
+    }
+}
+
 /// Walk the ancestor chain of `workspace_name@` and return the description of
 /// the most recent commit that has a non-empty message. Returns an empty string
 /// when no such ancestor exists or jj returns an error.
 fn latest_description(dir: &Path, workspace_name: &str) -> String {
     let ws_at = revset_ws(workspace_name);
     let revset = format!(r#"latest(ancestors({ws_at}) & description(glob:"?*"))"#,);
-    let result = run_jj_in(
+    let result = run_jj_ro_in(
         dir,
         &[
             "log",
@@ -144,13 +182,30 @@ fn latest_description(dir: &Path, workspace_name: &str) -> String {
 }
 
 /// Run `jj diff --stat --from <from> --to <to>` inside `dir` and parse the
-/// result. Returns a zeroed [`DiffStat`] if jj reports an error.
+/// result. Propagates jj's error so callers can fall back to another revset.
 fn diff_stat(dir: &Path, from: &str, to: &str) -> Result<DiffStat> {
-    let out = run_jj_in(dir, &["diff", "--stat", "--from", from, "--to", to]);
-    match out {
-        Ok(text) => vcs::parse_diff_stat(&text),
-        Err(_) => Ok(DiffStat::default()),
+    let text = run_jj_ro_in(dir, &["diff", "--stat", "--from", from, "--to", to])?;
+    vcs::parse_diff_stat(&text)
+}
+
+/// Revset for the point at which `to` forked off trunk.
+///
+/// Diffing from here rather than from `trunk()` itself keeps the stat to the
+/// workspace's own changes. `--from trunk()` compares the two tips, so a
+/// workspace that simply hasn't been rebased reports every change that landed
+/// on trunk since it branched, inverted — wrong numbers, and a diff whose cost
+/// grows with trunk's churn rather than with the workspace.
+fn fork_point_of(to: &str) -> String {
+    format!("fork_point(trunk() | {})", to)
+}
+
+/// Diff stat for a workspace against the point it forked off trunk, falling
+/// back to `trunk()` itself on jj versions without `fork_point()`.
+fn diff_stat_vs_trunk(dir: &Path, to: &str) -> DiffStat {
+    if let Ok(stat) = diff_stat(dir, &fork_point_of(to), to) {
+        return stat;
     }
+    diff_stat(dir, "trunk()", to).unwrap_or_default()
 }
 
 /// [`VcsBackend`] implementation that delegates to the `jj` CLI.
@@ -162,6 +217,11 @@ impl VcsBackend for JjBackend {
     }
 
     fn workspace_list(&self, repo_dir: &Path) -> Result<Vec<(String, WorkspaceInfo)>> {
+        // Deliberately *not* a read-only call: this is the one command a
+        // listing runs in the main workspace before fanning out, so letting it
+        // snapshot keeps uncommitted edits in the main working copy visible in
+        // the listing. Every per-workspace query that follows uses
+        // [`IGNORE_WC`], so a listing snapshots once instead of once per query.
         let out = run_jj_in(
             repo_dir,
             &["workspace", "list", "-T", workspace_list_template()],
@@ -214,12 +274,7 @@ impl VcsBackend for JjBackend {
         _worktree_dir: &Path,
         ws_name: &str,
     ) -> Result<DiffStat> {
-        let to = if ws_name == "default" {
-            "@".to_string()
-        } else {
-            revset_ws(ws_name)
-        };
-        diff_stat(repo_dir, "trunk()", &to)
+        Ok(diff_stat_vs_trunk(repo_dir, &workspace_revision(ws_name)))
     }
 
     fn latest_description(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> String {
@@ -227,14 +282,19 @@ impl VcsBackend for JjBackend {
     }
 
     fn is_merged_into_trunk(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> bool {
-        let revset = if ws_name == "default" {
-            "trunk()..@".to_string()
-        } else {
-            format!("trunk()..{}", revset_ws(ws_name))
-        };
-        match run_jj_in(
+        let revset = format!("trunk()..{}", workspace_revision(ws_name));
+        match run_jj_ro_in(
             repo_dir,
-            &["log", "-r", &revset, "--no-graph", "-T", "commit_id"],
+            &[
+                "log",
+                "-r",
+                &revset,
+                "--no-graph",
+                "-T",
+                "commit_id",
+                "--limit",
+                "1",
+            ],
         ) {
             Ok(out) => out.trim().is_empty(),
             Err(_) => false,
@@ -256,13 +316,9 @@ impl VcsBackend for JjBackend {
         ws_name: &str,
         limit: usize,
     ) -> String {
-        let ancestor_rev = if ws_name == "default" {
-            "ancestors(@)".to_string()
-        } else {
-            format!("ancestors({})", revset_ws(ws_name))
-        };
+        let ancestor_rev = format!("ancestors({})", workspace_revision(ws_name));
         let limit_str = limit.to_string();
-        run_jj_in(
+        run_jj_ro_in(
             repo_dir,
             &["log", "-r", &ancestor_rev, "--limit", &limit_str],
         )
@@ -270,22 +326,27 @@ impl VcsBackend for JjBackend {
     }
 
     fn preview_diff_stat(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> String {
-        let to = if ws_name == "default" {
-            "@".to_string()
-        } else {
-            revset_ws(ws_name)
-        };
-        run_jj_in(
-            repo_dir,
-            &["diff", "--stat", "--from", "trunk()", "--to", &to],
-        )
-        .unwrap_or_default()
+        let to = workspace_revision(ws_name);
+        let diff =
+            |from: &str| run_jj_ro_in(repo_dir, &["diff", "--stat", "--from", from, "--to", &to]);
+        diff(&fork_point_of(&to))
+            .or_else(|_| diff("trunk()"))
+            .unwrap_or_default()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_args_prepends_ignore_working_copy() {
+        assert_eq!(
+            read_only_args(&["log", "-r", "@"]),
+            vec!["--ignore-working-copy", "log", "-r", "@"]
+        );
+        assert_eq!(read_only_args(&[]), vec!["--ignore-working-copy"]);
+    }
 
     #[test]
     fn parse_workspace_info_basic() {
@@ -335,6 +396,19 @@ mod tests {
         assert_eq!(result[0].0, "my feature");
         assert_eq!(result[0].1.change_id, "abc12345");
         assert_eq!(result[0].1.description, "some description");
+    }
+
+    #[test]
+    fn workspace_revision_uses_at_for_main_workspace() {
+        assert_eq!(workspace_revision("default"), "@");
+        assert_eq!(workspace_revision("feature"), "feature@");
+        assert_eq!(workspace_revision("my feature"), "`my feature`@");
+    }
+
+    #[test]
+    fn fork_point_of_builds_merge_base_revset() {
+        assert_eq!(fork_point_of("@"), "fork_point(trunk() | @)");
+        assert_eq!(fork_point_of("feature@"), "fork_point(trunk() | feature@)");
     }
 
     #[test]

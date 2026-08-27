@@ -99,6 +99,17 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
+/// Build the diff range used to compare a worktree against trunk.
+///
+/// Three-dot (`trunk...HEAD`) diffs the merge base against HEAD, so the result
+/// only contains the worktree's own changes. Two-dot (`trunk..HEAD`) would
+/// additionally include the inverse of every commit that landed on trunk since
+/// the worktree branched — wrong numbers, and in a large, fast-moving repo a
+/// whole-repo diff computed once per worktree.
+fn trunk_range(trunk: &str) -> String {
+    format!("{}...HEAD", trunk)
+}
+
 /// [`VcsBackend`] implementation that delegates to the `git` CLI via worktrees.
 #[derive(Default)]
 pub struct GitBackend {
@@ -190,8 +201,16 @@ impl VcsBackend for GitBackend {
         worktree_dir: &Path,
         _ws_name: &str,
     ) -> Result<DiffStat> {
-        let range = format!("{}..HEAD", self.trunk(worktree_dir));
-        match run_git_in(worktree_dir, &["diff", "--stat", &range]) {
+        // `--shortstat` because only the summary line is parsed: `--stat`
+        // makes git render (and us pipe) one line per changed file.
+        match run_git_in(
+            worktree_dir,
+            &[
+                "diff",
+                "--shortstat",
+                &trunk_range(self.trunk(worktree_dir)),
+            ],
+        ) {
             Ok(text) => vcs::parse_diff_stat(&text),
             Err(_) => Ok(DiffStat::default()),
         }
@@ -241,8 +260,11 @@ impl VcsBackend for GitBackend {
     }
 
     fn preview_diff_stat(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> String {
-        let range = format!("{}..HEAD", self.trunk(worktree_dir));
-        run_git_in(worktree_dir, &["diff", "--stat", &range]).unwrap_or_default()
+        run_git_in(
+            worktree_dir,
+            &["diff", "--stat", &trunk_range(self.trunk(worktree_dir))],
+        )
+        .unwrap_or_default()
     }
 }
 
@@ -371,6 +393,69 @@ branch refs/heads/main
         let expected = dir.path().canonicalize().unwrap();
         let actual = root.canonicalize().unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn trunk_range_is_three_dot() {
+        assert_eq!(trunk_range("main"), "main...HEAD");
+    }
+
+    /// Regression: the trunk comparison used a two-dot range, so a worktree
+    /// that had changed one file reported every file trunk had touched since
+    /// the worktree branched (inverted, as deletions). It also made the diff
+    /// proportional to trunk's churn rather than to the worktree's changes.
+    #[test]
+    fn integration_diff_stat_ignores_trunk_advancing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "-q", "-b", "main", "."]);
+        git(&["config", "user.email", "dwm@example.com"]);
+        git(&["config", "user.name", "dwm"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        std::fs::write(repo.join("trunk-only.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+
+        // Branch a worktree off the current trunk tip and change one file.
+        let wt = dir.path().join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ]);
+        std::fs::write(wt.join("base.txt"), "base\nfeature\n").unwrap();
+        let wt_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&wt)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {:?} failed", args);
+        };
+        wt_git(&["add", "-A"]);
+        wt_git(&["commit", "-qm", "feature work"]);
+
+        // Trunk moves on afterwards, touching a file the worktree never saw.
+        std::fs::write(repo.join("trunk-only.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "trunk work"]);
+
+        let backend = GitBackend::default();
+        let stat = backend.diff_stat_vs_trunk(repo, &wt, "feature").unwrap();
+        assert_eq!(stat.files_changed, 1);
+        assert_eq!(stat.insertions, 1);
+        assert_eq!(stat.deletions, 0);
     }
 
     #[test]

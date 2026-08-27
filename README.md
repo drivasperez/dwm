@@ -63,6 +63,8 @@ dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
 
+The `Changes` column in `dwm list` and `dwm status` is each workspace's own diff, measured from the point it branched off trunk — a workspace that simply hasn't been rebased is not reported as containing everything that has since landed on trunk.
+
 ## Setup hooks
 
 After `dwm new` creates a workspace, it can run a setup script (e.g. `npm install`, copy `.env`, …) so the workspace is immediately usable. Configure it via `.dwm.toml` at the repo root:
