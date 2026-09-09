@@ -149,12 +149,15 @@ fn workspace_revision(ws_name: &str) -> String {
     }
 }
 
-/// Walk the ancestor chain of `workspace_name@` and return the description of
-/// the most recent commit that has a non-empty message. Returns an empty string
-/// when no such ancestor exists or jj returns an error.
+/// Return the first non-empty ancestor description in jj's reverse topological
+/// log order (children before parents). Returns an empty string when no such
+/// ancestor exists or jj returns an error.
 fn latest_description(dir: &Path, workspace_name: &str) -> String {
     let ws_at = revset_ws(workspace_name);
-    let revset = format!(r#"latest(ancestors({ws_at}) & description(glob:"?*"))"#,);
+    // `latest(...)` sorts by committer timestamp and must inspect the entire
+    // ancestry, even with `log --limit 1`. Let the log's limit stop the walk
+    // instead. This also prefers a descendant over a clock-skewed ancestor.
+    let revset = format!(r#"ancestors({ws_at}) & description(glob:"?*")"#);
     let result = run_jj_ro_in(
         dir,
         &[
@@ -338,6 +341,72 @@ impl VcsBackend for JjBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jj_test_command(dir: &Path, args: &[&str]) -> String {
+        run_jj_in(dir, args).unwrap()
+    }
+
+    #[test]
+    fn description_fallback_skips_empty_commits_and_handles_missing_workspace() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        jj_test_command(dir, &["git", "init"]);
+        assert_eq!(latest_description(dir, "default"), "");
+        jj_test_command(dir, &["describe", "-m", "older description"]);
+        jj_test_command(dir, &["new", "-m", "first line\nsecond line"]);
+        jj_test_command(dir, &["new"]);
+        jj_test_command(dir, &["new"]);
+        assert_eq!(
+            latest_description(dir, "default"),
+            "first line\nsecond line"
+        );
+        assert_eq!(latest_description(dir, "missing-workspace"), "");
+    }
+
+    #[test]
+    fn description_fallback_prefers_descendant_over_newer_ancestor_timestamp() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        let git = |args: &[&str], timestamp: &str| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_AUTHOR_DATE", timestamp)
+                .env("GIT_COMMITTER_DATE", timestamp)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+        };
+        git(&["init"], "2025-01-02T00:00:00Z");
+        git(
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "ancestor",
+            ],
+            "2025-01-02T00:00:00Z",
+        );
+        git(
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "descendant",
+            ],
+            "2025-01-01T00:00:00Z",
+        );
+        jj_test_command(dir, &["git", "init", "--colocate"]);
+        assert_eq!(latest_description(dir, "default"), "descendant");
+    }
 
     #[test]
     fn read_only_args_prepends_ignore_working_copy() {
