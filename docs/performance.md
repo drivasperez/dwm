@@ -107,8 +107,9 @@ The prototype is slower here because it verifies cloned files against target
 Git objects and refreshes the index. It remains opt-in (`checkout = "cow"`);
 standard checkout creation remains the default. Ignored-file copying is also
 explicitly configured. APFS native behavior and ordinary-copy behavior were
-exercised locally; an XFS native-clone CI step has been added, but its Linux run
-has not been executed from this macOS environment.
+exercised locally; an XFS native-clone CI step is prepared locally but excluded from this PR
+because publishing credentials cannot update workflow files. Linux native
+execution remains unverified.
 
 Reproduce (Python standard library only):
 
@@ -126,4 +127,4 @@ repository registry. It does not mount or format a volume. Raw samples:
 
 Validation: all 311 tests passed locally with native cloning required; production
 Clippy, formatting, and diff whitespace checks passed. Linux native execution
-remains a CI validation step.
+remains a follow-up validation step.

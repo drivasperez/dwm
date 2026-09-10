@@ -5,8 +5,9 @@ Status: implemented with experimental Git checkout sharing kept opt-in.
 Implemented: revision handling, shared native clone/copy layer, ignored-file
 seeding for Git and Git-backed jj, independent Git index population, integration
 tests, benchmark harness, and user documentation. Local APFS results are in
-[performance.md](performance.md). XFS coverage is configured in CI but has not
-been run locally.
+[performance.md](performance.md). An XFS CI step is prepared locally but not included in this PR because the
+publishing credentials cannot update workflow files. Linux native verification
+remains pending.
 
 Decisions made during implementation:
 
