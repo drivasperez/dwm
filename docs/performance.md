@@ -70,3 +70,60 @@ with samples, medians, ranges, speedup, and output hashes. Keep repository
 activity low during measurement. Relative ages and agent activity can change
 the output hashes even when VCS results are unchanged. No workspace output
 is included in the JSON.
+
+
+## Copy-on-write workspace creation (2026-09-10)
+
+Release-build measurements on local macOS/APFS. These are synthetic fixtures,
+not the dwm source checkout: 1,000 tracked 4 KiB files, four tracked 4 MiB files,
+and four ignored 4 MiB files. Each row creates five workspaces. The ignored-file
+comparison uses ordinary copies for the standard baseline and automatic clones
+for the CoW configuration. Source creation and Git objects are excluded from
+workspace-allocation deltas; the JSON records source costs separately.
+
+| Starting revisions | Copied ignored artifacts | Standard allocation | CoW allocation | Standard time | CoW time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| One shared commit | No | 108.08 MiB | 5.82 MiB | 2.30 s | 4.71 s |
+| One shared commit | Yes | 182.11 MiB | 3.43 MiB | 2.74 s | 5.47 s |
+| Five different commits | No | 140.92 MiB | 9.39 MiB | 2.48 s | 4.75 s |
+| Five different commits | Yes | 182.39 MiB | 21.09 MiB | 2.83 s | 5.50 s |
+
+Physical allocation was measured through volume free-space deltas on a shared
+APFS volume, with sync before each sample. Unrelated writes, delayed reclamation,
+and APFS accounting introduce substantial noise (including the apparently lower
+allocation when ignored artifacts are included). These figures demonstrate the
+storage benefit, but are not precise per-file savings or a production performance
+guarantee. Reproduce on a dedicated quiet volume for tighter measurements.
+The first creation and subsequent creations are recorded separately; OS caches
+were not flushed, so these are not cold-cache measurements.
+
+The native path reported 1,005 clone operations per checkout and four more for
+ignored files when enabled. Git status was clean after every creation. Rewriting
+1 MiB in each CoW checkout generally allocated about 5 MiB more, as expected;
+deletions and delayed reclamation were also recorded. No full baseline checkout
+cache is created for different starting revisions.
+
+The prototype is slower here because it verifies cloned files against target
+Git objects and refreshes the index. It remains opt-in (`checkout = "cow"`);
+standard checkout creation remains the default. Ignored-file copying is also
+explicitly configured. APFS native behavior and ordinary-copy behavior were
+exercised locally; an XFS native-clone CI step has been added, but its Linux run
+has not been executed from this macOS environment.
+
+Reproduce (Python standard library only):
+
+```sh
+cargo build --release
+python3 scripts/benchmark-cow.py target/release/dwm
+python3 scripts/benchmark-cow.py target/release/dwm --different-revisions
+# Use --directory /path/on/a/quiet/test-volume for allocation measurements.
+```
+
+The script creates and removes only its own temporary fixtures and uses a private
+repository registry. It does not mount or format a volume. Raw samples:
+[cow-benchmark.json](cow-benchmark.json) and
+[cow-benchmark-revisions.json](cow-benchmark-revisions.json).
+
+Validation: all 311 tests passed locally with native cloning required; production
+Clippy, formatting, and diff whitespace checks passed. Linux native execution
+remains a CI validation step.

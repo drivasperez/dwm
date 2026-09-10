@@ -353,6 +353,29 @@ setup = "npm install &amp;&amp; cp ../main/.env .env"
     </div>
 
     <div class="section">
+      <h2>COPY-ON-WRITE STORAGE</h2>
+      <p>Seed new Git or jj workspaces with selected ignored files before setup runs.
+        On APFS and supported Linux filesystems, independent copies share disk blocks
+        until modified. Other filesystems fall back to ordinary copies.</p>
+      <pre data-copyable="true"><code>[workspace]
+copy = ["node_modules", "target"]
+copy_mode = "auto"
+# Git only; opt in to experimental tracked-file sharing:
+# checkout = "cow"</code></pre>
+      <p>Paths are literal and relative. Files must be ignored in both workspaces;
+        tracked files and existing destination files are never overwritten.
+        <code>--from</code> selects the copy source. Keep source artifacts idle while
+        copying and let setup reconcile dependencies. Symlinks keep their original
+        targets; environments containing absolute paths may need rebuilding.</p>
+      <p>Experimental Git checkout sharing reports fallback for unsupported filesystems,
+        hooks, attributes, and other unproven configurations. It currently trades
+        additional verification time for reduced disk allocation. Failed population
+        leaves a locked worktree for inspection. jj supports ignored-file copying
+        but not the experimental checkout mode. Logical directory sizes do not show
+        copy-on-write savings.</p>
+    </div>
+
+    <div class="section">
       <h2>AGENT STATUS TRACKING</h2>
       <p>
         dwm can show the status of

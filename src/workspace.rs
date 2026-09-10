@@ -92,6 +92,11 @@ pub fn find_dwm_workspace(cwd: &Path) -> Option<(PathBuf, String, PathBuf)> {
 
 /// Return the path to the cross-platform repos registry file used by `--all`.
 fn registry_path() -> Result<PathBuf> {
+    // Allows benchmarks to keep their disposable repositories out of the
+    // user's multi-repository dashboard on platforms without XDG data dirs.
+    if let Some(path) = std::env::var_os("DWM_REGISTRY_PATH") {
+        return Ok(PathBuf::from(path));
+    }
     let data = dirs::data_dir().context("could not determine data directory")?;
     Ok(data.join("dwm").join("repos.txt"))
 }
@@ -306,7 +311,9 @@ fn new_workspace_inner(
             .iter()
             .find(|(n, _)| n == ws_name)
             .with_context(|| format!("workspace '{}' not found", ws_name))?;
-        resolved_at = info.change_id.clone();
+        resolved_at = deps
+            .backend
+            .workspace_start_revision(&root, ws_name, info)?;
         Some(resolved_at.as_str())
     } else {
         at
@@ -332,10 +339,39 @@ fn new_workspace_inner(
     // Load post-creation hooks before doing any VCS work so a malformed
     // .dwm.toml / conductor.json is reported up-front rather than after we've
     // already provisioned the workspace.
-    let loaded_hooks = hooks::load(&root)?;
+    let config = crate::config::load(&root)?;
+    if config.workspace.checkout == crate::config::Checkout::Cow
+        && deps.backend.vcs_type() == vcs::VcsType::Jj
+    {
+        bail!(
+            "workspace.checkout = 'cow' is experimental and currently supports Git only; jj supports workspace.copy"
+        );
+    }
+    let source = match from {
+        Some(name) if name != deps.backend.main_workspace_name() => worktrees.join(name),
+        _ => root.clone(),
+    };
+    let resolved = at
+        .map(|rev| deps.backend.resolve_revision(&root, rev))
+        .transpose()?;
+    let seed = crate::seed::SeedPlan::prepare(&source, deps.backend.vcs_type(), &config.workspace)?;
 
     eprintln!("{} workspace '{}'...", "creating".cyan(), ws_name.bold());
-    deps.backend.workspace_add(&root, &ws_path, &ws_name, at)?;
+    deps.backend.workspace_add_configured(
+        &root,
+        &ws_path,
+        &ws_name,
+        resolved.as_deref(),
+        &source,
+        &config.workspace,
+    )?;
+    seed.apply(&ws_path, deps.backend.vcs_type(), &config.workspace)
+        .with_context(|| {
+            format!(
+                "workspace created at {} but file copying failed; setup was not run",
+                ws_path.display()
+            )
+        })?;
     eprintln!(
         "{} workspace '{}' created at {}",
         "✓".green(),
@@ -350,7 +386,7 @@ fn new_workspace_inner(
         vcs_type: deps.backend.vcs_type(),
         from_workspace: from.map(|s| s.to_string()),
     };
-    hooks::run_setup(&loaded_hooks, &hook_ctx)?;
+    hooks::run_setup(&config.scripts, &hook_ctx)?;
 
     // stdout: path for shell wrapper to cd into
     println!("{}", ws_path.display());
@@ -2479,6 +2515,85 @@ mod tests {
     }
 
     // ── E2E tests with real git repos ───────────────────────────────
+
+    #[test]
+    fn e2e_configured_copy_runs_before_setup_and_from_uses_source() {
+        for vcs in [vcs::VcsType::Git, vcs::VcsType::Jj] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("repo");
+            fs::create_dir(&root).unwrap();
+            let run = |program: &str, args: &[&str]| {
+                let mut command = std::process::Command::new(program);
+                command.current_dir(&root).args(args);
+                crate::seed::output(command).unwrap()
+            };
+            if vcs == vcs::VcsType::Git {
+                run("git", &["init", "-q", "-b", "main"]);
+                run("git", &["config", "user.name", "dwm"]);
+                run("git", &["config", "user.email", "dwm@example.com"]);
+                run("git", &["config", "commit.gpgsign", "false"]);
+            } else {
+                run("jj", &["git", "init"]);
+            }
+            fs::write(root.join(".gitignore"), "cache/\nmarker\n.dwm/\n").unwrap();
+            fs::write(
+                root.join(".dwm.toml"),
+                "[workspace]\ncopy = ['cache']\n[scripts]\nsetup = 'cat cache/value > marker'\n",
+            )
+            .unwrap();
+            if vcs == vcs::VcsType::Git {
+                run("git", &["add", "."]);
+                run("git", &["commit", "-qm", "fixture"]);
+            } else {
+                run("jj", &["describe", "-m", "fixture"]);
+            }
+            fs::create_dir(root.join("cache")).unwrap();
+            fs::write(root.join("cache/value"), "main").unwrap();
+            let deps = WorkspaceDeps {
+                backend: vcs.to_backend(),
+                cwd: root.clone(),
+            };
+            new_workspace_inner(
+                &deps,
+                Some("one".into()),
+                if vcs == vcs::VcsType::Jj {
+                    Some("@")
+                } else {
+                    None
+                },
+                None,
+            )
+            .unwrap();
+            let one = worktrees_dir(&root).join("one");
+            assert_eq!(fs::read_to_string(one.join("marker")).unwrap(), "main");
+            fs::write(one.join("cache/value"), "source").unwrap();
+            new_workspace_inner(&deps, Some("two".into()), None, Some("one")).unwrap();
+            assert_eq!(
+                fs::read_to_string(worktrees_dir(&root).join("two/marker")).unwrap(),
+                "source"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("cache/value")).unwrap(),
+                "main"
+            );
+
+            // Invalid configuration fails before creating VCS metadata or running setup.
+            fs::write(
+                root.join(".dwm.toml"),
+                "[workspace]\ncopy = ['../escape']\n",
+            )
+            .unwrap();
+            assert!(new_workspace_inner(&deps, Some("invalid".into()), None, None).is_err());
+            assert!(!worktrees_dir(&root).join("invalid").exists());
+            if vcs == vcs::VcsType::Jj {
+                fs::write(root.join(".dwm.toml"), "[workspace]\ncheckout = 'cow'\n").unwrap();
+                assert!(
+                    new_workspace_inner(&deps, Some("unsupported".into()), None, None).is_err()
+                );
+                assert!(!worktrees_dir(&root).join("unsupported").exists());
+            }
+        }
+    }
 
     fn git_available() -> bool {
         std::process::Command::new("git")

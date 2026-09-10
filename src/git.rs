@@ -126,6 +126,48 @@ impl GitBackend {
 }
 
 impl VcsBackend for GitBackend {
+    fn workspace_start_revision(
+        &self,
+        repo_dir: &Path,
+        name: &str,
+        _info: &WorkspaceInfo,
+    ) -> Result<String> {
+        let output = run_git_in(repo_dir, &["worktree", "list", "--porcelain"])?;
+        parse_worktree_list(&output)
+            .into_iter()
+            .find(|entry| entry.path.file_name().is_some_and(|n| n == name))
+            .map(|entry| entry.head)
+            .with_context(|| format!("workspace '{name}' not found"))
+    }
+    fn resolve_revision(&self, repo_dir: &Path, revision: &str) -> Result<String> {
+        Ok(run_git_in(
+            repo_dir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{commit}}"),
+            ],
+        )?
+        .trim()
+        .to_string())
+    }
+
+    fn workspace_add_configured(
+        &self,
+        repo_dir: &Path,
+        ws_path: &Path,
+        name: &str,
+        at: Option<&str>,
+        source: &Path,
+        config: &crate::config::WorkspaceConfig,
+    ) -> Result<()> {
+        if config.checkout == crate::config::Checkout::Cow {
+            crate::git_cow::add(repo_dir, ws_path, name, at, source)
+        } else {
+            self.workspace_add(repo_dir, ws_path, name, at)
+        }
+    }
     fn root_from(&self, dir: &Path) -> Result<PathBuf> {
         let out = run_git_in(dir, &["rev-parse", "--show-toplevel"])?;
         Ok(PathBuf::from(out.trim()))
@@ -168,10 +210,16 @@ impl VcsBackend for GitBackend {
         repo_dir: &Path,
         ws_path: &Path,
         name: &str,
-        _at: Option<&str>,
+        at: Option<&str>,
     ) -> Result<()> {
         let path_str = ws_path.to_string_lossy();
-        run_git_in(repo_dir, &["worktree", "add", &path_str, "-b", name])?;
+        let mut args = vec!["worktree", "add", &path_str, "-b", name];
+        let resolved;
+        if let Some(rev) = at {
+            resolved = self.resolve_revision(repo_dir, rev)?;
+            args.push(&resolved);
+        }
+        run_git_in(repo_dir, &args)?;
         Ok(())
     }
 
@@ -380,6 +428,53 @@ branch refs/heads/main
     }
 
     // Integration tests that require a real git repo
+    #[test]
+    fn integration_workspace_add_honors_starting_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git_in(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        run_git_in(&repo, &["config", "user.email", "dwm@example.com"]).unwrap();
+        run_git_in(&repo, &["config", "user.name", "dwm"]).unwrap();
+        run_git_in(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        for content in ["first\n", "second\n"] {
+            std::fs::write(repo.join("file.txt"), content).unwrap();
+            run_git_in(&repo, &["add", "file.txt"]).unwrap();
+            run_git_in(&repo, &["commit", "-qm", content.trim()]).unwrap();
+        }
+
+        let backend = GitBackend::default();
+        let first = run_git_in(&repo, &["rev-parse", "HEAD~1"]).unwrap();
+        let head = run_git_in(&repo, &["rev-parse", "HEAD"]).unwrap();
+        // --at can supply a revision expression; --from supplies an ID.
+        for (name, at, expected_id, expected_content) in [
+            ("at", Some("HEAD~1"), first.trim(), "first\n"),
+            ("from", Some(first.trim()), first.trim(), "first\n"),
+            ("default", None, head.trim(), "second\n"),
+        ] {
+            let path = dir.path().join(name);
+            backend.workspace_add(&repo, &path, name, at).unwrap();
+            assert_eq!(
+                run_git_in(&path, &["rev-parse", "HEAD"]).unwrap().trim(),
+                expected_id
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join("file.txt")).unwrap(),
+                expected_content
+            );
+        }
+        assert!(
+            backend
+                .workspace_add(
+                    &repo,
+                    &dir.path().join("invalid"),
+                    "invalid",
+                    Some("missing-revision")
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn integration_root_from() {
         let dir = tempfile::tempdir().unwrap();
