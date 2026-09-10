@@ -1,0 +1,166 @@
+{
+  "fixture": {
+    "workspaces": 5,
+    "small_files": 1000,
+    "large_mib_each": 4,
+    "different_revisions": false
+  },
+  "measurement": "volume free-space deltas; unrelated writes and delayed reclamation introduce noise",
+  "results": [
+    {
+      "mode": "standard",
+      "seed": false,
+      "source_allocated_bytes": 64512000,
+      "created_bytes": 113328128,
+      "edit_extra_bytes": 32768,
+      "remaining_after_delete_bytes": 5681152,
+      "samples": [
+        {
+          "seconds": 0.7952905419999998,
+          "report": []
+        },
+        {
+          "seconds": 0.3612614999999999,
+          "report": []
+        },
+        {
+          "seconds": 0.396821584,
+          "report": []
+        },
+        {
+          "seconds": 0.35092204199999966,
+          "report": []
+        },
+        {
+          "seconds": 0.3925032919999998,
+          "report": []
+        }
+      ]
+    },
+    {
+      "mode": "cow",
+      "seed": false,
+      "source_allocated_bytes": 66396160,
+      "created_bytes": 6103040,
+      "edit_extra_bytes": 5246976,
+      "remaining_after_delete_bytes": 3764224,
+      "samples": [
+        {
+          "seconds": 0.9581646250000002,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git"
+          ]
+        },
+        {
+          "seconds": 0.9329587919999991,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git"
+          ]
+        },
+        {
+          "seconds": 0.9609041250000008,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git"
+          ]
+        },
+        {
+          "seconds": 0.9484375839999988,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git"
+          ]
+        },
+        {
+          "seconds": 0.9084640830000001,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "standard",
+      "seed": true,
+      "source_allocated_bytes": 66580480,
+      "created_bytes": 190951424,
+      "edit_extra_bytes": 8192,
+      "remaining_after_delete_bytes": 2871296,
+      "samples": [
+        {
+          "seconds": 0.5800491250000004,
+          "report": [
+            "Copied 4 files: 0 cloned, 4 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 0.544739958000001,
+          "report": [
+            "Copied 4 files: 0 cloned, 4 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 0.5447282920000003,
+          "report": [
+            "Copied 4 files: 0 cloned, 4 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 0.5487677079999997,
+          "report": [
+            "Copied 4 files: 0 cloned, 4 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 0.5204677920000016,
+          "report": [
+            "Copied 4 files: 0 cloned, 4 copied (16777216 logical bytes)"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "cow",
+      "seed": true,
+      "source_allocated_bytes": 65691648,
+      "created_bytes": 3592192,
+      "edit_extra_bytes": 5251072,
+      "remaining_after_delete_bytes": 4501504,
+      "samples": [
+        {
+          "seconds": 1.1349560409999988,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git",
+            "Copied 4 files: 4 cloned, 0 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 1.0810107080000009,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git",
+            "Copied 4 files: 4 cloned, 0 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 1.0890596670000008,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git",
+            "Copied 4 files: 4 cloned, 0 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 1.0709125419999985,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git",
+            "Copied 4 files: 4 cloned, 0 copied (16777216 logical bytes)"
+          ]
+        },
+        {
+          "seconds": 1.0958321249999976,
+          "report": [
+            "Checkout: 1005 verified source files reused (1005 clone operations, 0 copy operations); remaining files populated by Git",
+            "Copied 4 files: 4 cloned, 0 copied (16777216 logical bytes)"
+          ]
+        }
+      ]
+    }
+  ]
+}

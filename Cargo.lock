@@ -239,6 +239,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "owo-colors",
  "rand",
  "ratatui",
