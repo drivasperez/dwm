@@ -162,6 +162,75 @@ pub fn add(
     }
 }
 
+fn populate(destination: &Path, source: &Path, target: &str) -> Result<()> {
+    git(destination, &["read-tree", target])?;
+    let entries = seed::tracked(destination, crate::vcs::VcsType::Git)?;
+    let mut stats = fs_copy::CopyStats::default();
+    let mut cloned = std::collections::BTreeSet::new();
+    for path in &entries {
+        // A symlink ancestor or missing source is simply not reusable.
+        if fs_copy::check_parents(source, path).is_err() {
+            continue;
+        }
+        let source_path = source.join(path);
+        match fs::symlink_metadata(&source_path) {
+            Ok(meta) if meta.is_file() => (),
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+        let dest = destination.join(path);
+        fs_copy::check_parents(destination, path)?;
+        fs::create_dir_all(dest.parent().context("missing parent")?)?;
+        match fs_copy::copy_file(&source_path, &dest, CopyMode::Auto, &mut stats) {
+            Ok(()) => {
+                cloned.insert(path.clone());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // read-tree started a fresh index (no source stat cache). --really-refresh
+    // hashes private files against target blobs; code 1 means differences.
+    let out = Command::new("git")
+        .current_dir(destination)
+        .args(["update-index", "--really-refresh"])
+        .output()?;
+    ensure!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "refreshing index: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let changed = seed::paths(&git(destination, &["diff-files", "--name-only", "-z"])?)?;
+    let mut reused = 0;
+    for path in &cloned {
+        if changed.contains(path) {
+            fs::remove_file(destination.join(path))?;
+        } else {
+            reused += 1;
+        }
+    }
+    // Without --force, checkout-index leaves verified clones in place.
+    git(
+        destination,
+        &["checkout-index", "--all", "--index", "--quiet"],
+    )?;
+    git(destination, &["update-index", "--really-refresh"])?;
+    ensure!(
+        git(
+            destination,
+            &["status", "--porcelain", "--untracked-files=no"]
+        )?
+        .is_empty(),
+        "populated checkout does not match the target revision"
+    );
+    eprintln!(
+        "Checkout: {reused} verified source files reused ({} clone operations, {} copy operations); remaining files populated by Git",
+        stats.cloned, stats.copied
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +384,7 @@ mod tests {
                 if !fs_copy::try_clone(&root.join("a-readable"), &probe).unwrap() {
                     return;
                 }
-                fs::set_permissions(root.join("z-unreadable"), fs::Permissions::from_mode(0))
+                fs::set_permissions(root.join("z-unreadable"), fs::Permissions::from_mode(0o000))
                     .unwrap();
                 let destination = dir.path().join("partial");
                 let result = add(&root, &destination, "partial", None, &root);
@@ -339,73 +408,4 @@ mod tests {
             },
         );
     }
-}
-
-fn populate(destination: &Path, source: &Path, target: &str) -> Result<()> {
-    git(destination, &["read-tree", target])?;
-    let entries = seed::tracked(destination, crate::vcs::VcsType::Git)?;
-    let mut stats = fs_copy::CopyStats::default();
-    let mut cloned = std::collections::BTreeSet::new();
-    for path in &entries {
-        // A symlink ancestor or missing source is simply not reusable.
-        if fs_copy::check_parents(source, path).is_err() {
-            continue;
-        }
-        let source_path = source.join(path);
-        match fs::symlink_metadata(&source_path) {
-            Ok(meta) if meta.is_file() => (),
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
-        }
-        let dest = destination.join(path);
-        fs_copy::check_parents(destination, path)?;
-        fs::create_dir_all(dest.parent().context("missing parent")?)?;
-        match fs_copy::copy_file(&source_path, &dest, CopyMode::Auto, &mut stats) {
-            Ok(()) => {
-                cloned.insert(path.clone());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
-        }
-    }
-    // read-tree started a fresh index (no source stat cache). --really-refresh
-    // hashes private files against target blobs; code 1 means differences.
-    let out = Command::new("git")
-        .current_dir(destination)
-        .args(["update-index", "--really-refresh"])
-        .output()?;
-    ensure!(
-        matches!(out.status.code(), Some(0 | 1)),
-        "refreshing index: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let changed = seed::paths(&git(destination, &["diff-files", "--name-only", "-z"])?)?;
-    let mut reused = 0;
-    for path in &cloned {
-        if changed.contains(path) {
-            fs::remove_file(destination.join(path))?;
-        } else {
-            reused += 1;
-        }
-    }
-    // Without --force, checkout-index leaves verified clones in place.
-    git(
-        destination,
-        &["checkout-index", "--all", "--index", "--quiet"],
-    )?;
-    git(destination, &["update-index", "--really-refresh"])?;
-    ensure!(
-        git(
-            destination,
-            &["status", "--porcelain", "--untracked-files=no"]
-        )?
-        .is_empty(),
-        "populated checkout does not match the target revision"
-    );
-    eprintln!(
-        "Checkout: {reused} verified source files reused ({} clone operations, {} copy operations); remaining files populated by Git",
-        stats.cloned, stats.copied
-    );
-    Ok(())
 }

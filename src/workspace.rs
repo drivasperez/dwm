@@ -1533,18 +1533,18 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum MockCall {
-        WorkspaceAdd {
+        Add {
             repo_dir: PathBuf,
             ws_path: PathBuf,
             name: String,
             at: Option<String>,
         },
-        WorkspaceRemove {
+        Remove {
             repo_dir: PathBuf,
             name: String,
             ws_path: PathBuf,
         },
-        WorkspaceRename {
+        Rename {
             old_name: String,
             new_name: String,
         },
@@ -1603,7 +1603,7 @@ mod tests {
             name: &str,
             at: Option<&str>,
         ) -> Result<()> {
-            self.calls.lock().unwrap().push(MockCall::WorkspaceAdd {
+            self.calls.lock().unwrap().push(MockCall::Add {
                 repo_dir: repo_dir.to_path_buf(),
                 ws_path: ws_path.to_path_buf(),
                 name: name.to_string(),
@@ -1615,7 +1615,7 @@ mod tests {
         }
 
         fn workspace_remove(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()> {
-            self.calls.lock().unwrap().push(MockCall::WorkspaceRemove {
+            self.calls.lock().unwrap().push(MockCall::Remove {
                 repo_dir: repo_dir.to_path_buf(),
                 name: name.to_string(),
                 ws_path: ws_path.to_path_buf(),
@@ -1631,7 +1631,7 @@ mod tests {
             old_name: &str,
             new_name: &str,
         ) -> Result<()> {
-            self.calls.lock().unwrap().push(MockCall::WorkspaceRename {
+            self.calls.lock().unwrap().push(MockCall::Rename {
                 old_name: old_name.to_string(),
                 new_name: new_name.to_string(),
             });
@@ -1860,7 +1860,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceAdd {
+            MockCall::Add {
                 repo_dir,
                 ws_path,
                 name,
@@ -1871,7 +1871,7 @@ mod tests {
                 assert_eq!(name, "my-ws");
                 assert!(at.is_none());
             }
-            other => panic!("expected WorkspaceAdd, got {:?}", other),
+            other => panic!("expected Add, got {:?}", other),
         }
     }
 
@@ -1893,7 +1893,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceAdd { name, .. } => {
+            MockCall::Add { name, .. } => {
                 // Auto-generated name should be non-empty and contain a hyphen (adjective-noun)
                 assert!(!name.is_empty());
                 assert!(
@@ -1902,7 +1902,7 @@ mod tests {
                     name
                 );
             }
-            other => panic!("expected WorkspaceAdd, got {:?}", other),
+            other => panic!("expected Add, got {:?}", other),
         }
     }
 
@@ -1999,14 +1999,14 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceAdd {
+            MockCall::Add {
                 ws_path, name, at, ..
             } => {
                 assert_eq!(ws_path, &main_repo.join(".dwm/worktrees/forked"));
                 assert_eq!(name, "forked");
                 assert_eq!(at.as_deref(), Some("abc12345"));
             }
-            other => panic!("expected WorkspaceAdd, got {:?}", other),
+            other => panic!("expected Add, got {:?}", other),
         }
     }
 
@@ -2125,7 +2125,7 @@ mod tests {
         assert!(main_repo.join(".dwm/worktrees/b").exists());
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(matches!(&calls[0], MockCall::WorkspaceRemove { name, .. } if name == "a"));
+        assert!(matches!(&calls[0], MockCall::Remove { name, .. } if name == "a"));
     }
 
     #[test]
@@ -2199,7 +2199,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceRemove {
+            MockCall::Remove {
                 repo_dir,
                 name,
                 ws_path,
@@ -2208,7 +2208,7 @@ mod tests {
                 assert_eq!(name, "my-ws");
                 assert_eq!(ws_path, &ws_dir);
             }
-            other => panic!("expected WorkspaceRemove, got {:?}", other),
+            other => panic!("expected Remove, got {:?}", other),
         }
         assert!(!ws_dir.exists());
     }
@@ -2250,10 +2250,10 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         match &calls[0] {
-            MockCall::WorkspaceRemove { name, .. } => {
+            MockCall::Remove { name, .. } => {
                 assert_eq!(name, "inferred-ws");
             }
-            other => panic!("expected WorkspaceRemove, got {:?}", other),
+            other => panic!("expected Remove, got {:?}", other),
         }
     }
 
@@ -2304,13 +2304,13 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceRename {
+            MockCall::Rename {
                 old_name, new_name, ..
             } => {
                 assert_eq!(old_name, "old-name");
                 assert_eq!(new_name, "new-name");
             }
-            other => panic!("expected WorkspaceRename, got {:?}", other),
+            other => panic!("expected Rename, got {:?}", other),
         }
     }
 
@@ -2518,11 +2518,11 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::WorkspaceRename { old_name, new_name } => {
+            MockCall::Rename { old_name, new_name } => {
                 assert_eq!(old_name, "old-name");
                 assert_eq!(new_name, "new-name");
             }
-            other => panic!("expected WorkspaceRename, got {:?}", other),
+            other => panic!("expected Rename, got {:?}", other),
         }
     }
 

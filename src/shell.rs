@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn config_path_fish_default() {
         // Clear XDG_CONFIG_HOME to test default path.
-        let _guard = temp_env::with_var("XDG_CONFIG_HOME", None::<&str>, || {
+        temp_env::with_var("XDG_CONFIG_HOME", None::<&str>, || {
             let path = Shell::Fish.config_path();
             assert!(path.ends_with(".config/fish/config.fish"));
         });

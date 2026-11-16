@@ -19,77 +19,6 @@ pub fn output(mut command: Command) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn run(root: &Path, program: &str, args: &[&str]) {
-        let mut cmd = Command::new(program);
-        cmd.current_dir(root).args(args);
-        output(cmd).unwrap();
-    }
-
-    #[test]
-    fn git_and_jj_seed_only_ignored_files_and_reject_conflicts() {
-        for vcs in [VcsType::Git, VcsType::Jj] {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().join("source");
-            fs::create_dir(&root).unwrap();
-            if vcs == VcsType::Git {
-                run(&root, "git", &["init", "-q", "-b", "main"]);
-                run(&root, "git", &["config", "user.name", "dwm"]);
-                run(&root, "git", &["config", "user.email", "dwm@example.com"]);
-                run(&root, "git", &["config", "commit.gpgsign", "false"]);
-            } else {
-                run(&root, "jj", &["git", "init"]);
-            }
-            fs::write(root.join(".gitignore"), "artifacts/*\n!artifacts/keep\n").unwrap();
-            fs::create_dir(root.join("artifacts")).unwrap();
-            fs::write(root.join("artifacts/keep"), "tracked").unwrap();
-            if vcs == VcsType::Git {
-                run(&root, "git", &["add", "."]);
-                run(&root, "git", &["commit", "-qm", "fixture"]);
-            } else {
-                run(&root, "jj", &["describe", "-m", "fixture"]);
-            }
-            fs::write(root.join("artifacts/cache"), "cached").unwrap();
-            let config = WorkspaceConfig {
-                copy: vec!["artifacts".into()],
-                ..Default::default()
-            };
-            let plan = SeedPlan::prepare(&root, vcs, &config).unwrap();
-            assert_eq!(
-                plan.files,
-                BTreeSet::from([PathBuf::from("artifacts/cache")])
-            );
-            let dest = dir.path().join("dest");
-            let backend = vcs.to_backend();
-            backend
-                .workspace_add(
-                    &root,
-                    &dest,
-                    "dest",
-                    if vcs == VcsType::Jj { Some("@") } else { None },
-                )
-                .unwrap();
-            plan.apply(&dest, vcs, &config).unwrap();
-            assert_eq!(
-                fs::read_to_string(dest.join("artifacts/cache")).unwrap(),
-                "cached"
-            );
-            fs::write(dest.join("artifacts/cache"), "private").unwrap();
-            assert_eq!(
-                fs::read_to_string(root.join("artifacts/cache")).unwrap(),
-                "cached"
-            );
-            assert!(plan.apply(&dest, vcs, &config).is_err());
-            assert_eq!(
-                fs::read_to_string(dest.join("artifacts/keep")).unwrap(),
-                "tracked"
-            );
-        }
-    }
-}
-
 pub fn paths(bytes: &[u8]) -> Result<BTreeSet<PathBuf>> {
     bytes
         .split(|b| *b == 0)
@@ -269,5 +198,76 @@ impl SeedPlan {
             stats.bytes
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn run(root: &Path, program: &str, args: &[&str]) {
+        let mut cmd = Command::new(program);
+        cmd.current_dir(root).args(args);
+        output(cmd).unwrap();
+    }
+
+    #[test]
+    fn git_and_jj_seed_only_ignored_files_and_reject_conflicts() {
+        for vcs in [VcsType::Git, VcsType::Jj] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("source");
+            fs::create_dir(&root).unwrap();
+            if vcs == VcsType::Git {
+                run(&root, "git", &["init", "-q", "-b", "main"]);
+                run(&root, "git", &["config", "user.name", "dwm"]);
+                run(&root, "git", &["config", "user.email", "dwm@example.com"]);
+                run(&root, "git", &["config", "commit.gpgsign", "false"]);
+            } else {
+                run(&root, "jj", &["git", "init"]);
+            }
+            fs::write(root.join(".gitignore"), "artifacts/*\n!artifacts/keep\n").unwrap();
+            fs::create_dir(root.join("artifacts")).unwrap();
+            fs::write(root.join("artifacts/keep"), "tracked").unwrap();
+            if vcs == VcsType::Git {
+                run(&root, "git", &["add", "."]);
+                run(&root, "git", &["commit", "-qm", "fixture"]);
+            } else {
+                run(&root, "jj", &["describe", "-m", "fixture"]);
+            }
+            fs::write(root.join("artifacts/cache"), "cached").unwrap();
+            let config = WorkspaceConfig {
+                copy: vec!["artifacts".into()],
+                ..Default::default()
+            };
+            let plan = SeedPlan::prepare(&root, vcs, &config).unwrap();
+            assert_eq!(
+                plan.files,
+                BTreeSet::from([PathBuf::from("artifacts/cache")])
+            );
+            let dest = dir.path().join("dest");
+            let backend = vcs.to_backend();
+            backend
+                .workspace_add(
+                    &root,
+                    &dest,
+                    "dest",
+                    if vcs == VcsType::Jj { Some("@") } else { None },
+                )
+                .unwrap();
+            plan.apply(&dest, vcs, &config).unwrap();
+            assert_eq!(
+                fs::read_to_string(dest.join("artifacts/cache")).unwrap(),
+                "cached"
+            );
+            fs::write(dest.join("artifacts/cache"), "private").unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("artifacts/cache")).unwrap(),
+                "cached"
+            );
+            assert!(plan.apply(&dest, vcs, &config).is_err());
+            assert_eq!(
+                fs::read_to_string(dest.join("artifacts/keep")).unwrap(),
+                "tracked"
+            );
+        }
     }
 }
