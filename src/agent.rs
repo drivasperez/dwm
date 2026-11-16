@@ -74,7 +74,7 @@ impl fmt::Display for AgentSummary {
     }
 }
 
-/// Return the `agent-status` directory inside a per-repo `.dwm/` dir.
+/// Return the `agent-status` directory inside a per-repo dwm dir (`<repo>.dwm/`).
 fn agent_status_dir(repo_dir: &Path) -> PathBuf {
     repo_dir.join("agent-status")
 }
@@ -206,20 +206,20 @@ pub fn remove_agent_statuses_for_workspace(repo_dir: &Path, workspace: &str) {
 ///
 /// Returns `None` if the path doesn't correspond to a dwm-managed workspace.
 ///
-/// The returned `agent_status_dir` is the per-repo `.dwm/` directory (which is
+/// The returned `agent_status_dir` is the per-repo `<repo>.dwm/` directory (which is
 /// the directory the agent-status JSON files live under, in `agent-status/`).
 fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
-    // Case 1: cwd is inside a dwm workspace under <root>/.dwm/worktrees/<ws>/...
+    // Case 1: cwd is inside a dwm workspace under <root>.dwm/worktrees/<ws>/...
     if let Some((root, ws_name, _ws_path)) = workspace::find_dwm_workspace(cwd) {
-        return Some((root.join(".dwm"), ws_name));
+        return Some((workspace::dwm_dir(&root), ws_name));
     }
 
-    // Case 2: cwd is somewhere inside a repo root that has a .dwm/ dir.
-    // Walk up looking for a directory that has BOTH a VCS marker and a `.dwm/`
-    // subdirectory. That's the main repo for a dwm-managed clone.
+    // Case 2: cwd is somewhere inside a repo root that has a sibling
+    // `<root>.dwm/` dir. Walk up looking for a directory that has BOTH a VCS
+    // marker and a dwm dir. That's the main repo for a dwm-managed clone.
     let mut current = cwd.to_path_buf();
     loop {
-        let dwm = current.join(".dwm");
+        let dwm = workspace::dwm_dir(&current);
         if dwm.is_dir() {
             // Determine main workspace name from VCS type.
             let ws_name = if current.join(".jj").is_dir() {
@@ -661,13 +661,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        let ws = repo.join(".dwm/worktrees/my-feature");
+        let ws = workspace::worktrees_dir(&repo).join("my-feature");
         fs::create_dir_all(ws.join("src")).unwrap();
 
         let result = resolve_workspace_from_cwd(&ws.join("src"));
         assert!(result.is_some());
         let (agent_dir, ws_name) = result.unwrap();
-        assert_eq!(agent_dir, repo.join(".dwm"));
+        assert_eq!(agent_dir, workspace::dwm_dir(&repo));
         assert_eq!(ws_name, "my-feature");
     }
 
@@ -684,13 +684,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
-        fs::create_dir_all(repo.join(".dwm")).unwrap();
+        fs::create_dir_all(workspace::dwm_dir(&repo)).unwrap();
         let cwd = repo.join("src");
         fs::create_dir_all(&cwd).unwrap();
 
         let result = resolve_workspace_from_cwd(&cwd);
         let (agent_dir, ws_name) = result.unwrap();
-        assert_eq!(agent_dir, repo.join(".dwm"));
+        assert_eq!(agent_dir, workspace::dwm_dir(&repo));
         assert_eq!(ws_name, "main-worktree");
     }
 
@@ -699,7 +699,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        fs::create_dir_all(repo.join(".dwm")).unwrap();
+        fs::create_dir_all(workspace::dwm_dir(&repo)).unwrap();
         let cwd = repo.join("src");
         fs::create_dir_all(&cwd).unwrap();
 
@@ -713,7 +713,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        // No .dwm/ → not a dwm-managed repo.
+        // No <repo>.dwm/ → not a dwm-managed repo.
         let result = resolve_workspace_from_cwd(&repo);
         assert!(result.is_none());
     }
@@ -723,7 +723,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".jj")).unwrap();
-        let ws_dir = repo.join(".dwm/worktrees/my-feature");
+        let ws_dir = workspace::worktrees_dir(&repo).join("my-feature");
         fs::create_dir_all(&ws_dir).unwrap();
 
         let (agent_dir, ws) = resolve_workspace_from_cwd(&ws_dir).unwrap();

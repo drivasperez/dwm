@@ -2,9 +2,9 @@
 
 A TUI workspace manager for [jj](https://martinvonz.github.io/jj/) (Jujutsu VCS) and [git](https://git-scm.com/).
 
-dwm creates, lists, and deletes workspaces stored under `<repo>/.dwm/worktrees/<name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
+dwm creates, lists, and deletes workspaces stored under `<repo>.dwm/worktrees/<name>/`, with a shell wrapper that auto-`cd`s into the selected workspace. It works with both jj and git repositories.
 
-The first time you create a workspace in a repo, dwm adds `.dwm/` to your ignore rules — `.git/info/exclude` for git repos, `.gitignore` for jj-only repos — so the workspace dirs never end up tracked.
+The workspace directory sits next to the repo rather than inside it, so for `~/dev/myrepo` workspaces live in `~/dev/myrepo.dwm/worktrees/`. A jj workspace has no `.git` of its own, so git and editors that use it walk up to the nearest enclosing repo; keeping workspaces outside the repo means they are never mistaken for ignored files in it, and there is nothing to add to your ignore rules.
 
 ## Install
 
