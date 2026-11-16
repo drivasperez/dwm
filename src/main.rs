@@ -7,6 +7,7 @@ mod git_cow;
 mod hooks;
 #[allow(dead_code)]
 mod jj;
+mod jj_workspace_store;
 mod names;
 mod seed;
 mod shell;

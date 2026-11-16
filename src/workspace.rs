@@ -3293,7 +3293,24 @@ mod tests {
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
 
             assert!(!old_path.exists());
-            assert!(worktrees_dir(&main_repo).join("new-name").exists());
+            let new_path = worktrees_dir(&main_repo).join("new-name");
+            assert!(new_path.exists());
+
+            // jj's own record of the workspace's location must follow the move.
+            let out = std::process::Command::new("jj")
+                .args(["workspace", "root", "--name", "new-name"])
+                .current_dir(&main_repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                PathBuf::from(String::from_utf8(out.stdout).unwrap().trim()),
+                fs::canonicalize(&new_path).unwrap()
+            );
 
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
