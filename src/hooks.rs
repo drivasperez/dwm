@@ -28,9 +28,13 @@
 //!    }
 //!    ```
 //!
-//!    Other Conductor fields (`runScriptMode`, `enterpriseDataPrivacy`, etc.)
-//!    are accepted and ignored so that an existing `conductor.json` "just
-//!    works" without edits.
+//!    Other Conductor fields (`runScriptMode`, `enterpriseDataPrivacy`, etc.),
+//!    including unknown keys inside `scripts`, are accepted and ignored so
+//!    that an existing `conductor.json` "just works" without edits.
+//!
+//! In `.dwm.toml`, by contrast, unknown keys under `[scripts]` are an error,
+//! like every other unknown key in that file: a misspelt `setpu = ...` would
+//! otherwise silently never run.
 //!
 //! When neither file exists, an empty [`Hooks`] is returned and no script runs.
 //! When a file exists but is malformed, [`load`] returns an error so that
@@ -64,8 +68,11 @@ use crate::vcs::VcsType;
 
 /// Lifecycle hook commands declared by the user. Currently only [`Hooks::setup`]
 /// is invoked; the others are parsed for forward-compat.
+///
+/// This is the strict `.dwm.toml` `[scripts]` shape; `conductor.json` is parsed
+/// through its own lenient struct in [`crate::config::parse_conductor_json`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Hooks {
     pub setup: Option<String>,
     pub run: Option<String>,
@@ -90,14 +97,7 @@ fn parse_dwm_toml(s: &str) -> Result<Hooks> {
 
 #[cfg(test)]
 fn parse_conductor_json(s: &str) -> Result<Hooks> {
-    #[derive(Deserialize)]
-    struct Config {
-        #[serde(default)]
-        scripts: Option<Hooks>,
-    }
-    Ok(serde_json::from_str::<Config>(s)?
-        .scripts
-        .unwrap_or_default())
+    crate::config::parse_conductor_json(s)
 }
 
 #[cfg(test)]
@@ -240,23 +240,34 @@ mod tests {
     fn toml_missing_scripts_table_returns_empty_hooks() {
         let h = parse_dwm_toml("").unwrap();
         assert_eq!(h, Hooks::default());
-
-        // also: a TOML file with other unrelated keys
-        let s = r#"
-            other = "thing"
-        "#;
-        let h = parse_dwm_toml(s).unwrap();
-        assert_eq!(h, Hooks::default());
     }
 
     #[test]
-    fn toml_unknown_keys_in_scripts_are_ignored() {
+    fn toml_unrelated_top_level_keys_are_rejected() {
+        let s = r#"
+            other = "thing"
+        "#;
+        assert!(parse_dwm_toml(s).is_err());
+    }
+
+    /// `.dwm.toml` is dwm's own format, so a misspelt script key (e.g.
+    /// `setpu`) is an error rather than a silently skipped hook. Conductor
+    /// compatibility is handled by `conductor.json`, which stays lenient.
+    #[test]
+    fn toml_unknown_keys_in_scripts_are_rejected() {
         let s = r#"
             [scripts]
             setup = "x"
             mystery = "ignored"
         "#;
-        let h = parse_dwm_toml(s).unwrap();
+        let err = parse_dwm_toml(s).unwrap_err();
+        assert!(format!("{err:#}").contains("mystery"));
+    }
+
+    #[test]
+    fn conductor_unknown_script_keys_are_ignored() {
+        let s = r#"{ "scripts": { "setup": "x", "someConductorHook": "y" } }"#;
+        let h = parse_conductor_json(s).unwrap();
         assert_eq!(h.setup.as_deref(), Some("x"));
     }
 

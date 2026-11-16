@@ -77,6 +77,8 @@ setup = "npm install && cp ../main/.env .env"
 
 If `.dwm.toml` is absent but a [Conductor](https://www.conductor.build/docs/reference/conductor-json) `conductor.json` exists at the repo root, dwm reads `scripts.setup` from it as a drop-in fallback. Conductor-specific fields like `runScriptMode` and `enterpriseDataPrivacy` are accepted and ignored, so an existing `conductor.json` works without edits.
 
+`.dwm.toml` itself is strict: an unknown key or table anywhere in it (a typo like `[worksapce]` or `setpu = ...`, or a setting newer than your installed dwm) is an error naming the key and the file, rather than being silently ignored.
+
 The script runs as `sh -c "<command>"` with the new workspace as its working directory. Stdout and stderr from the script are forwarded to dwm's stderr (dwm's stdout is reserved for the path the shell wrapper `cd`s into). A non-zero exit prints a warning but doesn't unwind — the workspace is still created and you're still `cd`d into it.
 
 The script sees these environment variables:
