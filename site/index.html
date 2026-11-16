@@ -418,6 +418,12 @@ copy_mode = "auto"
         <dt>dwm delete [name]</dt>
         <dd>Delete a workspace (current one if name omitted)</dd>
 
+        <dt>dwm prune [--yes]</dt>
+        <dd>
+          Delete workspaces with nothing to lose: no uncommitted edits and no commits missing
+          from a remote. Dry run unless <code>--yes</code> is passed
+        </dd>
+
         <dt>dwm setup</dt>
         <dd>Interactive shell and agent setup</dd>
 

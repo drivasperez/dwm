@@ -69,6 +69,15 @@ pub struct DiffStat {
     pub deletions: u32,
 }
 
+/// Whether `dwm prune` may delete a workspace, and if not, why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PruneVerdict {
+    /// Nothing in the workspace would be lost by deleting it.
+    Prunable,
+    /// The workspace must be kept; the string is a human-readable reason.
+    Keep(String),
+}
+
 /// Abstraction over jj and git that workspace operations are delegated to.
 ///
 /// `Send + Sync` is required so `list_workspace_entries_inner` can fan out
@@ -158,6 +167,18 @@ pub trait VcsBackend: Send + Sync {
 
     fn preview_diff_stat(&self, _repo_dir: &Path, _worktree_dir: &Path, _ws_name: &str) -> String {
         String::new()
+    }
+
+    /// Decide whether a (non-main) workspace's work is safe to discard. This
+    /// may snapshot the working copy, but must never modify on-disk files.
+    /// The default is conservative: backends that cannot tell keep everything.
+    fn prune_verdict(
+        &self,
+        _repo_dir: &Path,
+        _worktree_dir: &Path,
+        _ws_name: &str,
+    ) -> PruneVerdict {
+        PruneVerdict::Keep("pruning is not supported for this backend".to_string())
     }
 }
 

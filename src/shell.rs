@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Subcommands whose stdout may be a workspace path that the shell wrapper
 /// should `cd` into. This is the single source of truth — both the POSIX and
 /// fish wrapper generators read from this list.
-pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename"];
+pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename", "prune"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -266,6 +266,13 @@ mod tests {
     }
 
     #[test]
+    fn prune_is_a_cd_subcommand() {
+        // `dwm prune --yes` prints the repo root when it deletes the
+        // workspace the shell is currently in.
+        assert!(CD_SUBCOMMANDS.contains(&"prune"));
+    }
+
+    #[test]
     fn posix_function_includes_all_cd_subcommands() {
         let fn_str = posix_function();
         for sub in CD_SUBCOMMANDS {
@@ -470,7 +477,7 @@ mod tests {
     #[test]
     fn config_path_fish_default() {
         // Clear XDG_CONFIG_HOME to test default path.
-        let _guard = temp_env::with_var("XDG_CONFIG_HOME", None::<&str>, || {
+        temp_env::with_var("XDG_CONFIG_HOME", None::<&str>, || {
             let path = Shell::Fish.config_path();
             assert!(path.ends_with(".config/fish/config.fish"));
         });

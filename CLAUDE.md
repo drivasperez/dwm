@@ -27,20 +27,21 @@ Every bug fix should include a regression test. New parsing functions and utilit
 
 ### Module responsibilities
 
-- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `setup`.
+- **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `prune`, `setup`.
 - **`vcs.rs`** — VCS abstraction layer. Defines `VcsBackend` trait, `VcsType` enum, and owns `WorkspaceInfo` and `DiffStat` structs shared across backends.
 - **`jj.rs`** — jj backend implementing `VcsBackend`. Runs `jj` as a subprocess via `Command`. Parsing functions for jj output are pure and unit-tested.
 - **`git.rs`** — Git backend implementing `VcsBackend`. Runs `git` as a subprocess via `Command`.
 - **`workspace.rs`** — Business logic: workspace creation/deletion/listing/renaming/switching. Manages the per-repo `<repo-root>/.dwm/` directory and a cross-platform repo registry (`dirs::data_dir()/dwm/repos.txt`) used by `list --all`. `WorkspaceEntry` is the main data struct passed to the TUI.
 - **`tui.rs`** — Ratatui-based interactive table picker. Renders `WorkspaceEntry` data in a 6-column table (Name, Change, Description, Bookmarks, Modified, Changes).
 - **`names.rs`** — Random `adjective-noun` name generator for unnamed workspaces.
-- **`shell.rs`** — Emits a shell wrapper function; subcommands that may produce a workspace path (`new`, `list`, `switch`, `delete`, `rename`) capture stdout and `cd` into the result, while all other subcommands run the binary directly.
+- **`shell.rs`** — Emits a shell wrapper function; subcommands that may produce a workspace path (`new`, `list`, `switch`, `delete`, `rename`, `prune`) capture stdout and `cd` into the result, while all other subcommands run the binary directly.
 
 ### Key patterns
 
 - **stdout vs stderr convention:** stdout is reserved for machine-readable output (paths the shell wrapper acts on). All human messages go to stderr via `eprintln!`.
 - **jj template parsing:** `jj.rs` uses NUL-separated (`\0`) fields in jj templates with `\0\n` as record separator, parsed by `parse_workspace_info()`. This avoids issues with descriptions containing tabs/newlines.
 - **`latest_description()`** walks ancestors via `jj log` with revset `latest(ancestors(WS@) & description(glob:"?*"))` to find the first non-empty commit description.
+- **Pruning:** `dwm prune` asks each backend for a `PruneVerdict` via `VcsBackend::prune_verdict` (default: keep). The jj backend snapshots with `jj status` in the workspace and never runs `jj workspace update-stale` (it can discard on-disk edits); stale/sibling-op workspaces are kept. Parsing of `jj status` stderr and of the unpushed-commit log lives in pure functions in `jj.rs`/`git.rs`. Deletion goes through `delete_workspace_inner`.
 - **Workspace storage:** workspaces live at `<repo-root>/.dwm/worktrees/<name>/`. The first time a workspace is created in a repo, dwm appends `.dwm/` to `.git/info/exclude` (or `.gitignore` for jj-only repos) so the directory is not tracked. A cross-platform registry at `dirs::data_dir()/dwm/repos.txt` records repos that have ever had a workspace, used by `dwm list --all`. Agent status data lives in `<repo-root>/.dwm/agent-status/` — a sibling of `worktrees/` so workspace names and internal metadata can't collide.
 
 ## Documentation

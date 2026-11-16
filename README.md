@@ -58,10 +58,14 @@ dwm status              # non-interactive workspace summary
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
+dwm prune               # list workspaces that are safe to delete (dry run)
+dwm prune --yes         # delete them
 dwm setup               # interactive shell and agent setup
 dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
+
+`dwm prune` cleans up finished workspaces. It never touches the main workspace, and treats a workspace as prunable only when deleting it loses nothing: for jj, it snapshots the workspace (`jj status`) and then requires that every non-empty commit in `trunk()..<ws>@` is reachable from a remote bookmark, so uncommitted edits and local-only commits both keep it. A stale workspace, or one reporting a sibling operation, is kept rather than repaired with `jj workspace update-stale`, which can overwrite on-disk edits. For git, the worktree needs a clean `git status` (untracked files count, ignored files don't) and no commits that are on neither trunk nor any remote branch. Without `--yes` it only prints each workspace's verdict and reason; with it, prunable workspaces go through the same path as `dwm delete`.
 
 The `Changes` column in `dwm list` and `dwm status` is each workspace's own diff, measured from the point it branched off trunk — a workspace that simply hasn't been rebased is not reported as containing everything that has since landed on trunk.
 
@@ -76,6 +80,8 @@ setup = "npm install && cp ../main/.env .env"
 ```
 
 If `.dwm.toml` is absent but a [Conductor](https://www.conductor.build/docs/reference/conductor-json) `conductor.json` exists at the repo root, dwm reads `scripts.setup` from it as a drop-in fallback. Conductor-specific fields like `runScriptMode` and `enterpriseDataPrivacy` are accepted and ignored, so an existing `conductor.json` works without edits.
+
+`.dwm.toml` itself is strict: an unknown key or table anywhere in it (a typo like `[worksapce]` or `setpu = ...`, or a setting newer than your installed dwm) is an error naming the key and the file, rather than being silently ignored.
 
 The script runs as `sh -c "<command>"` with the new workspace as its working directory. Stdout and stderr from the script are forwarded to dwm's stderr (dwm's stdout is reserved for the path the shell wrapper `cd`s into). A non-zero exit prints a warning but doesn't unwind — the workspace is still created and you're still `cd`d into it.
 
