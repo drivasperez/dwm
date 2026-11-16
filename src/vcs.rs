@@ -74,6 +74,31 @@ pub struct DiffStat {
 /// `Send + Sync` is required so `list_workspace_entries_inner` can fan out
 /// per-workspace VCS calls across a `std::thread::scope`.
 pub trait VcsBackend: Send + Sync {
+    /// Resolve identifiers used for creation independently of display metadata.
+    fn resolve_revision(&self, _repo_dir: &Path, revision: &str) -> Result<String> {
+        Ok(revision.to_string())
+    }
+
+    fn workspace_start_revision(
+        &self,
+        _repo_dir: &Path,
+        _name: &str,
+        info: &WorkspaceInfo,
+    ) -> Result<String> {
+        Ok(info.change_id.clone())
+    }
+
+    fn workspace_add_configured(
+        &self,
+        repo_dir: &Path,
+        ws_path: &Path,
+        name: &str,
+        at: Option<&str>,
+        _source: &Path,
+        _config: &crate::config::WorkspaceConfig,
+    ) -> Result<()> {
+        self.workspace_add(repo_dir, ws_path, name, at)
+    }
     /// Return the repository root given any directory inside the repo.
     fn root_from(&self, dir: &Path) -> Result<PathBuf>;
 

@@ -1,10 +1,14 @@
 mod agent;
 mod cli;
+mod config;
+mod fs_copy;
 mod git;
+mod git_cow;
 mod hooks;
 #[allow(dead_code)]
 mod jj;
 mod names;
+mod seed;
 mod shell;
 mod tui;
 mod vcs;

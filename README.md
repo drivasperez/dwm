@@ -92,6 +92,64 @@ The script sees these environment variables:
 | `CONDUCTOR_WORKSPACE_PATH` | Alias of `DWM_WORKSPACE_PATH`                  |
 | `CONDUCTOR_WORKSPACE_NAME` | Alias of `DWM_WORKSPACE_NAME`                  |
 
+## Copy-on-write storage
+
+Opt into copying selected ignored files into new workspaces before setup runs:
+
+```toml
+[workspace]
+copy = ["node_modules", "target"]
+copy_mode = "auto"
+```
+
+`auto` uses native copy-on-write clones on APFS and Linux filesystems with reflink
+support, falling back to ordinary copies where unavailable. `copy` forces ordinary
+copies. Cloned regular files have independent contents: editing either workspace
+or deleting the source does not change the other copy. Symlinks retain their
+original targets, including absolute targets outside the workspace.
+
+The source is the main repository, or the named workspace with `--from`. Entries
+are literal relative paths, not glob patterns. Only files ignored at both source
+and destination are copied; tracked files and VCS/dwm metadata are excluded.
+Existing destination files are never overwritten. Missing sources are reported
+and skipped. Keep source build/dependency directories idle while copying: this
+is not an atomic snapshot of a running build.
+
+Setup still runs afterward to reconcile dependencies with the destination's
+lockfile. Some artifacts, notably Python virtual environments and caches with
+absolute paths, cannot be reused reliably across directories. A copying failure
+returns an error and leaves the workspace available for inspection without
+running setup. Reports go to stderr; stdout remains the shell's destination path.
+This works with Git and Git-backed jj repositories (including non-colocated jj).
+The experimental jj simple backend does not support ignored-file copying.
+
+For **experimental Git tracked-checkout sharing**, additionally set:
+
+```toml
+[workspace]
+checkout = "cow" # default: "standard"
+```
+
+This creates a real Git worktree and uses independent filesystem clones for
+reusable source files. Git verifies private files against the requested commit
+and populates missing or different files. Staged and unstaged source changes are
+not imported. Git `--at` selects a commit; jj retains its existing parent-revision
+semantics. There is no daemon, mount, or extra baseline cache.
+
+The experimental mode falls back to normal Git creation for unsupported
+filesystems, checkout attributes/conversions, filters/LFS, submodules, hooks,
+and certain index/worktree configurations. The creation report identifies a
+fallback. A failed population leaves a locked partial Git worktree for inspection;
+use `git worktree unlock <path>` before manually repairing or removing it.
+Cloned file timestamps can differ from an ordinary fresh checkout, which may
+matter to build tools. jj rejects `checkout = "cow"`; use `copy` entries there.
+
+Copy-on-write saves physical disk blocks, not logical file sizes. New and
+rewritten data and per-file metadata still consume space. Normal directory-size
+reports can count shared blocks more than once. See [measurements and the
+benchmark harness](docs/performance.md). `DWM_REGISTRY_PATH` can override the
+repository registry location, which the benchmark uses to isolate its fixtures.
+
 ## Agent status tracking
 
 dwm can show the status of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents running in your workspaces. The TUI's "Agent" column displays per-workspace counts like `2 waiting, 1 working`.

@@ -54,7 +54,9 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -62,7 +64,8 @@ use crate::vcs::VcsType;
 
 /// Lifecycle hook commands declared by the user. Currently only [`Hooks::setup`]
 /// is invoked; the others are parsed for forward-compat.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
 pub struct Hooks {
     pub setup: Option<String>,
     pub run: Option<String>,
@@ -79,87 +82,27 @@ pub struct HookContext {
     pub from_workspace: Option<String>,
 }
 
-// ── On-disk schema (TOML / conductor.json) ──────────────────────────────────
-
-/// Schema for `<repo-root>/.dwm.toml`.
-///
-/// Mirrors `conductor.json`'s shape (top-level `scripts` table) so users can
-/// mentally translate. Unknown top-level keys are accepted and ignored — we
-/// don't `deny_unknown_fields` because that would make new Conductor fields
-/// break existing dwm installs.
-#[derive(Debug, Default, Deserialize)]
-struct DwmConfigFile {
-    #[serde(default)]
-    scripts: Option<Scripts>,
-}
-
-/// Schema for `<repo-root>/conductor.json`. Same shape as `DwmConfigFile` —
-/// kept as a distinct type only because `serde_json` and `toml` derive paths
-/// stay tidier this way and we may diverge later.
-#[derive(Debug, Default, Deserialize)]
-struct ConductorConfigFile {
-    #[serde(default)]
-    scripts: Option<Scripts>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Scripts {
-    #[serde(default)]
-    setup: Option<String>,
-    #[serde(default)]
-    run: Option<String>,
-    #[serde(default)]
-    archive: Option<String>,
-}
-
-impl From<Scripts> for Hooks {
-    fn from(s: Scripts) -> Self {
-        Hooks {
-            setup: s.setup,
-            run: s.run,
-            archive: s.archive,
-        }
-    }
-}
-
-// ── Parsing helpers (pure, unit-tested) ─────────────────────────────────────
-
-/// Parse `.dwm.toml` content. Returns an empty [`Hooks`] when `[scripts]` is
-/// absent. Errors on malformed TOML.
+// Parsing helpers retained for focused compatibility tests.
+#[cfg(test)]
 fn parse_dwm_toml(s: &str) -> Result<Hooks> {
-    let cfg: DwmConfigFile = toml::from_str(s).context("parsing .dwm.toml")?;
-    Ok(cfg.scripts.map(Hooks::from).unwrap_or_default())
+    Ok(crate::config::parse_toml(s)?.scripts)
 }
 
-/// Parse `conductor.json` content. Returns an empty [`Hooks`] when `scripts`
-/// is absent. Errors on malformed JSON. Unknown fields are ignored.
+#[cfg(test)]
 fn parse_conductor_json(s: &str) -> Result<Hooks> {
-    let cfg: ConductorConfigFile = serde_json::from_str(s).context("parsing conductor.json")?;
-    Ok(cfg.scripts.map(Hooks::from).unwrap_or_default())
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        scripts: Option<Hooks>,
+    }
+    Ok(serde_json::from_str::<Config>(s)?
+        .scripts
+        .unwrap_or_default())
 }
 
-// ── Loader ──────────────────────────────────────────────────────────────────
-
-/// Load hooks from `<repo_root>/.dwm.toml` or `<repo_root>/conductor.json`.
-///
-/// Precedence: `.dwm.toml` wins if both exist. Returns an empty [`Hooks`] if
-/// neither file exists. Returns an error if the chosen file is malformed.
+#[cfg(test)]
 pub fn load(repo_root: &Path) -> Result<Hooks> {
-    let dwm_toml = repo_root.join(".dwm.toml");
-    if dwm_toml.exists() {
-        let s = std::fs::read_to_string(&dwm_toml)
-            .with_context(|| format!("reading {}", dwm_toml.display()))?;
-        return parse_dwm_toml(&s).with_context(|| format!("in {}", dwm_toml.display()));
-    }
-
-    let conductor = repo_root.join("conductor.json");
-    if conductor.exists() {
-        let s = std::fs::read_to_string(&conductor)
-            .with_context(|| format!("reading {}", conductor.display()))?;
-        return parse_conductor_json(&s).with_context(|| format!("in {}", conductor.display()));
-    }
-
-    Ok(Hooks::default())
+    Ok(crate::config::load(repo_root)?.scripts)
 }
 
 // ── Runner ──────────────────────────────────────────────────────────────────
