@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Subcommands whose stdout may be a workspace path that the shell wrapper
 /// should `cd` into. This is the single source of truth — both the POSIX and
 /// fish wrapper generators read from this list.
-pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename"];
+pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename", "prune"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -263,6 +263,13 @@ mod tests {
             posix_function().contains("command dwm"),
             "must use `command dwm` to avoid recursing into the wrapper"
         );
+    }
+
+    #[test]
+    fn prune_is_a_cd_subcommand() {
+        // `dwm prune --yes` prints the repo root when it deletes the
+        // workspace the shell is currently in.
+        assert!(CD_SUBCOMMANDS.contains(&"prune"));
     }
 
     #[test]

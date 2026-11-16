@@ -66,6 +66,11 @@ fn main() -> Result<()> {
         Commands::Delete { name } => {
             workspace::delete_workspace(name, workspace::DeleteOutput::Verbose).map(|_| ())
         }
+        Commands::Prune { yes } => workspace::prune_workspaces(if yes {
+            workspace::PruneMode::Delete
+        } else {
+            workspace::PruneMode::DryRun
+        }),
         Commands::HookHandler => agent::handle_hook(),
         Commands::AgentSetup => agent::setup_agent_hooks(),
         Commands::Setup => {

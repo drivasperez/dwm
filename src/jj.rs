@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
+use crate::vcs::{self, DiffStat, PruneVerdict, VcsBackend, WorkspaceInfo};
 
 /// Global flag that turns a `jj` invocation into a pure read of the repo.
 ///
@@ -211,6 +211,114 @@ fn diff_stat_vs_trunk(dir: &Path, to: &str) -> DiffStat {
     diff_stat(dir, "trunk()", to).unwrap_or_default()
 }
 
+/// Outcome of running a jj command whose stderr matters even on success.
+struct Captured {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run `jj` inside `dir`, capturing both streams instead of failing on a
+/// non-zero exit.
+fn capture_jj_in(dir: &Path, args: &[&str]) -> Result<Captured> {
+    let output = Command::new("jj")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .context("failed to run jj - is it installed?")?;
+    Ok(Captured {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+/// Classify the result of `jj status` run inside a workspace (which snapshots
+/// its working copy). Returns a reason to keep the workspace, or `None` when
+/// the snapshot fully captured the on-disk state.
+///
+/// A stale workspace or a sibling operation is deliberately *not* repaired
+/// with `jj workspace update-stale`, which can overwrite on-disk edits; the
+/// workspace is kept and the user decides.
+fn snapshot_problem(success: bool, stderr: &str) -> Option<String> {
+    if !success {
+        let reason = if stderr.contains("working copy is stale") {
+            "working copy is stale; run `jj workspace update-stale` in it yourself if that is safe"
+                .to_string()
+        } else if stderr.contains("sibling of the working copy's operation") {
+            "workspace reports a sibling operation; resolve it with jj before pruning".to_string()
+        } else {
+            let first = stderr
+                .lines()
+                .map(|l| l.trim().trim_start_matches("Error:").trim())
+                .find(|l| !l.is_empty())
+                .unwrap_or("unknown error");
+            format!("could not snapshot working copy: {first}")
+        };
+        return Some(reason);
+    }
+    // jj exits 0 but leaves files untracked when they exceed
+    // `snapshot.max-new-file-size`. Those files exist only on disk.
+    if stderr.contains("Refused to snapshot") {
+        return Some("some files were too large to snapshot and exist only on disk".to_string());
+    }
+    None
+}
+
+/// Revset of a workspace's non-empty commits since trunk that no remote
+/// bookmark contains, i.e. work that exists only in this repo.
+fn unpushed_revset(ws_rev: &str) -> String {
+    format!("(trunk()..{ws_rev}) ~ empty() ~ ::remote_bookmarks()")
+}
+
+/// Template for [`unpushed_revset`]: change id, whether the commit is the
+/// workspace's working-copy commit, and the first description line,
+/// NUL-separated with `\0\n` between records.
+fn unpushed_template(ws_rev: &str) -> String {
+    format!(
+        r#"change_id.shortest(8) ++ "\0" ++ self.contained_in("{ws_rev}") ++ "\0" ++ description.first_line() ++ "\0\n""#
+    )
+}
+
+/// Parse the output of [`unpushed_template`] into a reason to keep the
+/// workspace, or `None` if every commit is reachable from a remote bookmark.
+fn unpushed_problem(output: &str) -> Option<String> {
+    let mut working_copy_dirty = false;
+    let mut commits: Vec<(String, String)> = Vec::new();
+    for record in output.split("\0\n") {
+        let record = record.trim_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = record.split('\0').collect();
+        let [change_id, is_wc, description, ..] = fields[..] else {
+            continue;
+        };
+        if is_wc == "true" {
+            working_copy_dirty = true;
+        } else {
+            commits.push((change_id.to_string(), description.to_string()));
+        }
+    }
+    let mut reasons = Vec::new();
+    if working_copy_dirty {
+        reasons.push("working copy has uncommitted changes".to_string());
+    }
+    if let Some((id, desc)) = commits.first() {
+        let n = commits.len();
+        let noun = if n == 1 { "commit" } else { "commits" };
+        let desc = if desc.is_empty() {
+            "(no description)"
+        } else {
+            desc
+        };
+        reasons.push(format!(
+            "{n} {noun} not on any remote bookmark (e.g. {id} {desc:?})"
+        ));
+    }
+    (!reasons.is_empty()).then(|| reasons.join("; "))
+}
+
 /// [`VcsBackend`] implementation that delegates to the `jj` CLI.
 pub struct JjBackend;
 
@@ -326,6 +434,37 @@ impl VcsBackend for JjBackend {
             &["log", "-r", &ancestor_rev, "--limit", &limit_str],
         )
         .unwrap_or_default()
+    }
+
+    fn prune_verdict(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> PruneVerdict {
+        // Snapshot the workspace first: without it, edits made since the last
+        // jj command in that workspace would be invisible to the log below.
+        let status = match capture_jj_in(worktree_dir, &["status"]) {
+            Ok(c) => c,
+            Err(e) => return PruneVerdict::Keep(format!("{e:#}")),
+        };
+        if let Some(reason) = snapshot_problem(status.success, &status.stderr) {
+            return PruneVerdict::Keep(reason);
+        }
+        let ws_rev = workspace_revision(ws_name);
+        let log = run_jj_ro_in(
+            repo_dir,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                &unpushed_revset(&ws_rev),
+                "-T",
+                &unpushed_template(&ws_rev),
+            ],
+        );
+        match log {
+            Ok(out) => match unpushed_problem(&out) {
+                Some(reason) => PruneVerdict::Keep(reason),
+                None => PruneVerdict::Prunable,
+            },
+            Err(e) => PruneVerdict::Keep(format!("could not inspect commits: {e:#}")),
+        }
     }
 
     fn preview_diff_stat(&self, repo_dir: &Path, _worktree_dir: &Path, ws_name: &str) -> String {
@@ -492,6 +631,87 @@ mod tests {
     fn revset_ws_name_with_spaces() {
         assert_eq!(revset_ws("my feature"), "`my feature`@");
         assert_eq!(revset_ws("work in progress"), "`work in progress`@");
+    }
+
+    #[test]
+    fn snapshot_problem_accepts_clean_success() {
+        assert_eq!(snapshot_problem(true, ""), None);
+        assert_eq!(snapshot_problem(true, "Working copy changes:\n"), None);
+    }
+
+    #[test]
+    fn snapshot_problem_reports_stale_without_suggesting_auto_repair() {
+        let stderr = "Error: The working copy is stale (not updated since operation 7f9a3f6996b4).\n\
+                      Hint: Run `jj workspace update-stale` to update it.\n";
+        let reason = snapshot_problem(false, stderr).unwrap();
+        assert!(reason.contains("stale"), "{reason}");
+    }
+
+    #[test]
+    fn snapshot_problem_reports_sibling_operation() {
+        let stderr = "Error: The repo was loaded at operation 1234, which seems to be a sibling \
+                      of the working copy's operation 5678\n";
+        let reason = snapshot_problem(false, stderr).unwrap();
+        assert!(reason.contains("sibling"), "{reason}");
+    }
+
+    #[test]
+    fn snapshot_problem_reports_other_failures_with_first_error_line() {
+        let reason = snapshot_problem(false, "\nError: There is no jj repo in \".\"\n").unwrap();
+        assert_eq!(
+            reason,
+            "could not snapshot working copy: There is no jj repo in \".\""
+        );
+    }
+
+    #[test]
+    fn snapshot_problem_reports_refused_large_files_even_on_success() {
+        let stderr = "Warning: Refused to snapshot some files:\n  big.bin: 2.0KiB\n";
+        assert!(snapshot_problem(true, stderr).is_some());
+    }
+
+    #[test]
+    fn unpushed_problem_none_when_empty() {
+        assert_eq!(unpushed_problem(""), None);
+        assert_eq!(unpushed_problem("\n"), None);
+    }
+
+    #[test]
+    fn unpushed_problem_reports_dirty_working_copy() {
+        let out = "tzspyyxu\0true\0\0\n";
+        assert_eq!(
+            unpushed_problem(out).as_deref(),
+            Some("working copy has uncommitted changes")
+        );
+    }
+
+    #[test]
+    fn unpushed_problem_reports_local_commits() {
+        let out = "unqsprwr\0false\0local work\0\nabcdefgh\0false\0\0\n";
+        assert_eq!(
+            unpushed_problem(out).as_deref(),
+            Some("2 commits not on any remote bookmark (e.g. unqsprwr \"local work\")")
+        );
+    }
+
+    #[test]
+    fn unpushed_problem_reports_both() {
+        let out = "tzspyyxu\0true\0wip\0\nunqsprwr\0false\0\0\n";
+        assert_eq!(
+            unpushed_problem(out).as_deref(),
+            Some(
+                "working copy has uncommitted changes; \
+                 1 commit not on any remote bookmark (e.g. unqsprwr \"(no description)\")"
+            )
+        );
+    }
+
+    #[test]
+    fn unpushed_revset_excludes_empty_and_remote_reachable() {
+        assert_eq!(
+            unpushed_revset("ws@"),
+            "(trunk()..ws@) ~ empty() ~ ::remote_bookmarks()"
+        );
     }
 
     #[test]

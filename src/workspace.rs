@@ -463,6 +463,115 @@ fn delete_workspace_inner(
     }
 }
 
+/// Whether `dwm prune` only reports or also deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneMode {
+    /// Report each workspace's verdict without deleting anything.
+    DryRun,
+    /// Delete every workspace whose verdict is prunable.
+    Delete,
+}
+
+/// Delete (or, in [`PruneMode::DryRun`], list) workspaces whose work is safe to
+/// discard. Prints a redirect path to stdout if cwd was inside a deleted one.
+pub fn prune_workspaces(mode: PruneMode) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let backend = vcs::detect(&cwd)?;
+    let deps = WorkspaceDeps { backend, cwd };
+    if let Some(redirect) = prune_workspaces_inner(&deps, mode)?.redirect {
+        println!("{}", redirect.display());
+    }
+    Ok(())
+}
+
+/// What [`prune_workspaces_inner`] decided and did.
+#[derive(Debug, Default)]
+struct PruneOutcome {
+    /// Every non-main workspace with its verdict, sorted by name.
+    verdicts: Vec<(String, vcs::PruneVerdict)>,
+    /// Workspaces that were actually deleted.
+    deleted: Vec<String>,
+    /// Where the shell should `cd` if cwd was inside a deleted workspace.
+    redirect: Option<PathBuf>,
+}
+
+fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<PruneOutcome> {
+    let root = resolve_repo_root(deps)?;
+    let worktrees = worktrees_dir(&root);
+    let main_ws_name = deps.backend.main_workspace_name();
+
+    let mut names: Vec<String> = Vec::new();
+    if worktrees.exists() {
+        for entry in fs::read_dir(&worktrees)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // The main workspace lives at the repo root, never under
+            // worktrees/, but guard against a directory that shares its name.
+            if name != main_ws_name {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+
+    let mut outcome = PruneOutcome::default();
+    if names.is_empty() {
+        eprintln!("no workspaces to prune");
+        return Ok(outcome);
+    }
+
+    let mut failures = 0;
+    for name in names {
+        let ws_path = worktrees.join(&name);
+        // Check immediately before deleting so the verdict is as fresh as
+        // possible when acting on it.
+        let verdict = deps.backend.prune_verdict(&root, &ws_path, &name);
+        match &verdict {
+            vcs::PruneVerdict::Keep(reason) => {
+                eprintln!("{} {}: {}", "keep ".yellow(), name.bold(), reason);
+            }
+            vcs::PruneVerdict::Prunable => match mode {
+                PruneMode::DryRun => eprintln!("{} {}", "prune".green(), name.bold()),
+                PruneMode::Delete => {
+                    match delete_workspace_inner(deps, Some(name.clone()), DeleteOutput::Quiet) {
+                        Ok(redirect) => {
+                            eprintln!("{} {} deleted", "✓".green(), name.bold());
+                            outcome.redirect = outcome.redirect.or(redirect);
+                            outcome.deleted.push(name.clone());
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            eprintln!("{} {}: delete failed: {e:#}", "error".red(), name.bold());
+                        }
+                    }
+                }
+            },
+        }
+        outcome.verdicts.push((name, verdict));
+    }
+
+    let prunable = outcome
+        .verdicts
+        .iter()
+        .filter(|(_, v)| *v == vcs::PruneVerdict::Prunable)
+        .count();
+    let kept = outcome.verdicts.len() - prunable;
+    match mode {
+        PruneMode::DryRun if prunable > 0 => eprintln!(
+            "\n{prunable} prunable, {kept} kept (dry run; run `dwm prune --yes` to delete)"
+        ),
+        PruneMode::DryRun => eprintln!("\nnothing to prune, {kept} kept"),
+        PruneMode::Delete => eprintln!("\n{} deleted, {kept} kept", outcome.deleted.len()),
+    }
+    if failures > 0 {
+        bail!("failed to delete {failures} prunable workspace(s)");
+    }
+    Ok(outcome)
+}
+
 /// Switch to the named workspace by printing its path to stdout for the shell
 /// wrapper to `cd` into.
 pub fn switch_workspace(name: &str) -> Result<()> {
@@ -1448,6 +1557,8 @@ mod tests {
         workspaces: Vec<(String, vcs::WorkspaceInfo)>,
         /// Records every mutating call for assertions.
         calls: Arc<Mutex<Vec<MockCall>>>,
+        /// Verdicts returned by prune_verdict, keyed by workspace name.
+        prune_verdicts: std::collections::HashMap<String, vcs::PruneVerdict>,
     }
 
     impl MockBackend {
@@ -1461,9 +1572,18 @@ mod tests {
                     root,
                     workspaces,
                     calls: Arc::clone(&calls),
+                    prune_verdicts: Default::default(),
                 },
                 calls,
             )
+        }
+
+        fn with_prune_verdicts(mut self, verdicts: &[(&str, vcs::PruneVerdict)]) -> Self {
+            self.prune_verdicts = verdicts
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.clone()))
+                .collect();
+            self
         }
     }
 
@@ -1556,6 +1676,18 @@ mod tests {
 
         fn main_workspace_name(&self) -> &'static str {
             "default"
+        }
+
+        fn prune_verdict(
+            &self,
+            _repo_dir: &Path,
+            _worktree_dir: &Path,
+            ws_name: &str,
+        ) -> vcs::PruneVerdict {
+            self.prune_verdicts
+                .get(ws_name)
+                .cloned()
+                .unwrap_or_else(|| vcs::PruneVerdict::Keep("mock default".to_string()))
         }
     }
 
@@ -1936,6 +2068,108 @@ mod tests {
             let entries = read_and_prune_registry().unwrap();
             assert!(entries.contains(&fs::canonicalize(&main_repo).unwrap()));
         });
+    }
+
+    // ── prune_workspaces_inner tests ─────────────────────────────────
+
+    fn keep(reason: &str) -> vcs::PruneVerdict {
+        vcs::PruneVerdict::Keep(reason.to_string())
+    }
+
+    /// Repo with `.dwm/worktrees/{a,b}`, where `a` is prunable and `b` not.
+    fn prune_fixture(tmp: &Path) -> (PathBuf, MockBackend, Arc<Mutex<Vec<MockCall>>>) {
+        let main_repo = make_repo_with_vcs(tmp);
+        for ws in ["a", "b"] {
+            fs::create_dir_all(main_repo.join(".dwm/worktrees").join(ws)).unwrap();
+        }
+        let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let mock =
+            mock.with_prune_verdicts(&[("a", vcs::PruneVerdict::Prunable), ("b", keep("dirty"))]);
+        (main_repo, mock, calls)
+    }
+
+    #[test]
+    fn prune_dry_run_reports_without_deleting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_repo, mock, calls) = prune_fixture(tmp.path());
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+        let outcome = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
+        assert_eq!(
+            outcome.verdicts,
+            vec![
+                ("a".to_string(), vcs::PruneVerdict::Prunable),
+                ("b".to_string(), keep("dirty")),
+            ]
+        );
+        assert!(outcome.deleted.is_empty());
+        assert!(outcome.redirect.is_none());
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(main_repo.join(".dwm/worktrees/a").exists());
+        assert!(main_repo.join(".dwm/worktrees/b").exists());
+    }
+
+    #[test]
+    fn prune_delete_removes_only_prunable_via_delete_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_repo, mock, calls) = prune_fixture(tmp.path());
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+        let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert_eq!(outcome.deleted, vec!["a".to_string()]);
+        assert!(!main_repo.join(".dwm/worktrees/a").exists());
+        assert!(main_repo.join(".dwm/worktrees/b").exists());
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0], MockCall::WorkspaceRemove { name, .. } if name == "a"));
+    }
+
+    #[test]
+    fn prune_never_touches_main_workspace_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        let dir = main_repo.join(".dwm/worktrees/default");
+        fs::create_dir_all(&dir).unwrap();
+        let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let mock = mock.with_prune_verdicts(&[("default", vcs::PruneVerdict::Prunable)]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.clone(),
+        };
+        let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert!(outcome.verdicts.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn prune_redirects_when_cwd_inside_deleted_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_repo, mock, _calls) = prune_fixture(tmp.path());
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo.join(".dwm/worktrees/a"),
+        };
+        let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert_eq!(outcome.redirect, Some(main_repo));
+    }
+
+    #[test]
+    fn prune_without_worktrees_dir_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+        };
+        let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert!(outcome.verdicts.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     // ── delete_workspace_inner tests ─────────────────────────────────
@@ -3315,5 +3549,257 @@ mod tests {
             assert!(new_ws.exists());
             assert!(new_ws.join("src").exists());
         });
+    }
+
+    // ── prune e2e ─────────────────────────────────────────────────────
+
+    /// Run a command, asserting success, with a fixed identity so commits can
+    /// be pushed regardless of the developer's own VCS config.
+    fn run_ok(dir: &Path, program: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .env("JJ_USER", "dwm test")
+            .env("JJ_EMAIL", "dwm@example.com")
+            .env("GIT_AUTHOR_NAME", "dwm test")
+            .env("GIT_AUTHOR_EMAIL", "dwm@example.com")
+            .env("GIT_COMMITTER_NAME", "dwm test")
+            .env("GIT_COMMITTER_EMAIL", "dwm@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{program} {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn verdict_of<'a>(outcome: &'a PruneOutcome, name: &str) -> &'a vcs::PruneVerdict {
+        &outcome
+            .verdicts
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no verdict for {name}: {:?}", outcome.verdicts))
+            .1
+    }
+
+    fn assert_keep_contains(outcome: &PruneOutcome, name: &str, needle: &str) {
+        match verdict_of(outcome, name) {
+            vcs::PruneVerdict::Keep(reason) => {
+                assert!(
+                    reason.contains(needle),
+                    "{name}: {reason:?} lacks {needle:?}"
+                )
+            }
+            other => panic!("{name}: expected Keep({needle}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e2e_jj_prune() {
+        assert!(jj_available(), "jj must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("remote.git");
+        run_ok(
+            tmp.path(),
+            "git",
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        let repo_path = tmp.path().join("repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        run_ok(&repo_path, "jj", &["git", "init"]);
+        let repo = repo_path.canonicalize().unwrap();
+        run_ok(
+            &repo,
+            "jj",
+            &["git", "remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        fs::write(repo.join("base.txt"), "base").unwrap();
+        run_ok(&repo, "jj", &["commit", "-m", "base"]);
+        run_ok(&repo, "jj", &["bookmark", "create", "main", "-r", "@-"]);
+        run_ok(
+            &repo,
+            "jj",
+            &["git", "push", "--bookmark", "main", "--allow-new"],
+        );
+
+        let worktrees = repo.join(".dwm/worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        let add = |name: &str| {
+            let path = worktrees.join(name);
+            run_ok(
+                &repo,
+                "jj",
+                &[
+                    "workspace",
+                    "add",
+                    "--name",
+                    name,
+                    "-r",
+                    "main",
+                    path.to_str().unwrap(),
+                ],
+            );
+            path
+        };
+
+        // Fresh workspace: nothing to lose.
+        add("clean");
+        // On-disk edit that no jj command has snapshotted yet.
+        let dirty = add("dirty");
+        fs::write(dirty.join("wip.txt"), "wip").unwrap();
+        // A described commit that only exists locally.
+        let local = add("local");
+        fs::write(local.join("local.txt"), "local").unwrap();
+        run_ok(&local, "jj", &["commit", "-m", "local work"]);
+        // The same, but pushed to the remote.
+        let pushed = add("pushed");
+        fs::write(pushed.join("pushed.txt"), "pushed").unwrap();
+        run_ok(&pushed, "jj", &["commit", "-m", "pushed work"]);
+        run_ok(&pushed, "jj", &["bookmark", "create", "feat", "-r", "@-"]);
+        run_ok(
+            &pushed,
+            "jj",
+            &["git", "push", "--bookmark", "feat", "--allow-new"],
+        );
+        // Stale: its working-copy commit is rewritten from another workspace,
+        // and it has an unsnapshotted edit on disk.
+        let stale = add("stale");
+        run_ok(&stale, "jj", &["status"]);
+        run_ok(&repo, "jj", &["new", "main"]);
+        fs::write(repo.join("other.txt"), "x").unwrap();
+        run_ok(&repo, "jj", &["commit", "-m", "trunk moves"]);
+        run_ok(&repo, "jj", &["rebase", "-r", "stale@", "-d", "@-"]);
+        fs::write(stale.join("unsnapshotted.txt"), "precious").unwrap();
+
+        let deps = WorkspaceDeps {
+            backend: Box::new(crate::jj::JjBackend),
+            cwd: repo.clone(),
+        };
+        let dry = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
+        assert_eq!(verdict_of(&dry, "clean"), &vcs::PruneVerdict::Prunable);
+        assert_eq!(verdict_of(&dry, "pushed"), &vcs::PruneVerdict::Prunable);
+        assert_keep_contains(&dry, "dirty", "uncommitted changes");
+        assert_keep_contains(&dry, "local", "not on any remote bookmark");
+        assert_keep_contains(&dry, "stale", "stale");
+        assert!(worktrees.join("clean").exists(), "dry run must not delete");
+
+        let done = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert_eq!(
+            done.deleted,
+            vec!["clean".to_string(), "pushed".to_string()]
+        );
+        for gone in ["clean", "pushed"] {
+            assert!(!worktrees.join(gone).exists(), "{gone} should be deleted");
+        }
+        for kept in ["dirty", "local", "stale"] {
+            assert!(worktrees.join(kept).exists(), "{kept} should be kept");
+        }
+        // prune must never run `jj workspace update-stale`, which could
+        // clobber this file.
+        assert_eq!(
+            fs::read_to_string(stale.join("unsnapshotted.txt")).unwrap(),
+            "precious"
+        );
+        let listed = run_ok(&repo, "jj", &["workspace", "list", "-T", "name ++ \"\\n\""]);
+        assert!(
+            !listed.lines().any(|l| l == "clean" || l == "pushed"),
+            "{listed}"
+        );
+        assert!(listed.lines().any(|l| l == "default"), "{listed}");
+    }
+
+    #[test]
+    fn e2e_git_prune() {
+        assert!(git_available(), "git must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("remote.git");
+        run_ok(
+            tmp.path(),
+            "git",
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        let repo_path = tmp.path().join("repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        run_ok(&repo_path, "git", &["init", "-q", "-b", "main"]);
+        let repo = repo_path.canonicalize().unwrap();
+        run_ok(
+            &repo,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        );
+        run_ok(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_ok(&repo, "git", &["push", "-q", "-u", "origin", "main"]);
+        // Keep .dwm/ out of the main worktree's status.
+        fs::write(repo.join(".git/info/exclude"), ".dwm/\n").unwrap();
+
+        let worktrees = repo.join(".dwm/worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        let add = |name: &str| {
+            let path = worktrees.join(name);
+            run_ok(
+                &repo,
+                "git",
+                &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()],
+            );
+            path
+        };
+
+        add("clean");
+        let dirty = add("dirty");
+        fs::write(dirty.join("untracked.txt"), "wip").unwrap();
+        let ignored = add("ignored");
+        fs::write(ignored.join(".gitignore"), "target/\n").unwrap();
+        run_ok(&ignored, "git", &["add", ".gitignore"]);
+        run_ok(&ignored, "git", &["commit", "-q", "-m", "ignore target"]);
+        run_ok(&ignored, "git", &["push", "-q", "-u", "origin", "ignored"]);
+        fs::create_dir_all(ignored.join("target")).unwrap();
+        fs::write(ignored.join("target/build.o"), "artifact").unwrap();
+        let local = add("local");
+        run_ok(
+            &local,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "local work"],
+        );
+        let ahead = add("ahead");
+        run_ok(
+            &ahead,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "pushed"],
+        );
+        run_ok(&ahead, "git", &["push", "-q", "-u", "origin", "ahead"]);
+        run_ok(
+            &ahead,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "not yet pushed"],
+        );
+
+        let deps = WorkspaceDeps {
+            backend: Box::new(crate::git::GitBackend::default()),
+            cwd: repo.clone(),
+        };
+        let dry = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
+        assert_eq!(verdict_of(&dry, "clean"), &vcs::PruneVerdict::Prunable);
+        assert_eq!(verdict_of(&dry, "ignored"), &vcs::PruneVerdict::Prunable);
+        assert_keep_contains(&dry, "dirty", "uncommitted change");
+        assert_keep_contains(&dry, "local", "\"local work\"");
+        assert_keep_contains(&dry, "ahead", "1 commit not pushed");
+        assert!(!dry.verdicts.iter().any(|(n, _)| n == "main-worktree"));
+
+        let done = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+        assert_eq!(
+            done.deleted,
+            vec!["clean".to_string(), "ignored".to_string()]
+        );
+        for kept in ["dirty", "local", "ahead"] {
+            assert!(worktrees.join(kept).exists(), "{kept} should be kept");
+        }
+        let listed = run_ok(&repo, "git", &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains("/clean\n"), "{listed}");
     }
 }

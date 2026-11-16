@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::vcs::{self, DiffStat, VcsBackend, WorkspaceInfo};
+use crate::vcs::{self, DiffStat, PruneVerdict, VcsBackend, WorkspaceInfo};
 
 /// Run `git` with the given arguments inside `dir`.
 fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
@@ -108,6 +108,52 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
 /// whole-repo diff computed once per worktree.
 fn trunk_range(trunk: &str) -> String {
     format!("{}...HEAD", trunk)
+}
+
+/// Reason to keep a worktree given `git status --porcelain` output, or `None`
+/// if it is clean. Untracked files count (they would be deleted); ignored
+/// files do not (they are build output and caches, which pruning is for).
+fn dirty_problem(porcelain: &str) -> Option<String> {
+    let n = porcelain.lines().filter(|l| !l.trim().is_empty()).count();
+    match n {
+        0 => None,
+        1 => Some("1 uncommitted change".to_string()),
+        n => Some(format!("{n} uncommitted changes")),
+    }
+}
+
+/// Arguments for listing commits on `HEAD` that are on neither trunk nor any
+/// remote-tracking branch. This subsumes "ahead of upstream": a branch whose
+/// upstream is behind has exactly those commits off every remote, and a branch
+/// that was never pushed has every commit it added since trunk.
+fn unpushed_log_args(trunk: &str) -> Vec<String> {
+    [
+        "log",
+        "--format=%h%x00%s",
+        "HEAD",
+        "--not",
+        "--remotes",
+        &format!("refs/heads/{trunk}"),
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Reason to keep a worktree given the output of [`unpushed_log_args`].
+fn unpushed_problem(log: &str) -> Option<String> {
+    let commits: Vec<(&str, &str)> = log
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.split_once('\0').unwrap_or((l, "")))
+        .collect();
+    let (hash, subject) = commits.first()?;
+    let n = commits.len();
+    let noun = if n == 1 { "commit" } else { "commits" };
+    Some(format!(
+        "{n} {noun} not pushed to any remote (e.g. {hash} {subject:?})"
+    ))
 }
 
 /// [`VcsBackend`] implementation that delegates to the `git` CLI via worktrees.
@@ -307,6 +353,30 @@ impl VcsBackend for GitBackend {
         .unwrap_or_default()
     }
 
+    fn prune_verdict(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> PruneVerdict {
+        match run_git_in(
+            worktree_dir,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        ) {
+            Ok(out) => {
+                if let Some(reason) = dirty_problem(&out) {
+                    return PruneVerdict::Keep(reason);
+                }
+            }
+            Err(e) => return PruneVerdict::Keep(format!("{e:#}")),
+        }
+        let trunk = self.trunk(worktree_dir).to_string();
+        let args = unpushed_log_args(&trunk);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match run_git_in(worktree_dir, &args) {
+            Ok(out) => match unpushed_problem(&out) {
+                Some(reason) => PruneVerdict::Keep(reason),
+                None => PruneVerdict::Prunable,
+            },
+            Err(e) => PruneVerdict::Keep(format!("could not compare with trunk '{trunk}': {e:#}")),
+        }
+    }
+
     fn preview_diff_stat(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> String {
         run_git_in(
             worktree_dir,
@@ -319,6 +389,38 @@ impl VcsBackend for GitBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dirty_problem_counts_porcelain_entries() {
+        assert_eq!(dirty_problem(""), None);
+        assert_eq!(
+            dirty_problem(" M src/a.rs\n").as_deref(),
+            Some("1 uncommitted change")
+        );
+        assert_eq!(
+            dirty_problem(" M src/a.rs\n?? new.txt\nUU conflict.rs\n").as_deref(),
+            Some("3 uncommitted changes")
+        );
+    }
+
+    #[test]
+    fn unpushed_problem_parses_hash_and_subject() {
+        assert_eq!(unpushed_problem(""), None);
+        assert_eq!(
+            unpushed_problem("abc1234\0add thing\ndef5678\0\n").as_deref(),
+            Some("2 commits not pushed to any remote (e.g. abc1234 \"add thing\")")
+        );
+    }
+
+    #[test]
+    fn unpushed_log_args_negate_trunk_and_remotes() {
+        let args = unpushed_log_args("main");
+        let not = args.iter().position(|a| a == "--not").unwrap();
+        let head = args.iter().position(|a| a == "HEAD").unwrap();
+        assert!(head < not);
+        assert!(args[not..].contains(&"--remotes".to_string()));
+        assert!(args[not..].contains(&"refs/heads/main".to_string()));
+    }
 
     #[test]
     fn parse_worktree_list_basic() {

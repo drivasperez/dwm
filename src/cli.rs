@@ -45,6 +45,12 @@ pub enum Commands {
         /// Workspace name to delete
         name: Option<String>,
     },
+    /// Delete workspaces whose work is safe to discard (dry run unless --yes)
+    Prune {
+        /// Actually delete prunable workspaces instead of only listing them
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Process a Claude Code hook event (used internally by hooks)
     #[command(name = "hook-handler", hide = true)]
     HookHandler,
@@ -152,6 +158,20 @@ mod tests {
     fn delete_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "delete", "foo"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Delete { name: Some(n) }) if n == "foo"));
+    }
+
+    #[test]
+    fn prune_defaults_to_dry_run() {
+        let cli = Cli::try_parse_from(["dwm", "prune"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Prune { yes: false })));
+    }
+
+    #[test]
+    fn prune_yes_flag() {
+        for flag in ["--yes", "-y"] {
+            let cli = Cli::try_parse_from(["dwm", "prune", flag]).unwrap();
+            assert!(matches!(cli.command, Some(Commands::Prune { yes: true })));
+        }
     }
 
     #[test]
