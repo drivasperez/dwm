@@ -8,12 +8,6 @@ The first time you create a workspace in a repo, dwm adds `.dwm/` to your ignore
 
 ## Install
 
-Homebrew:
-
-```sh
-brew install drivasperez/tap/dwm
-```
-
 Cargo:
 
 ```sh
