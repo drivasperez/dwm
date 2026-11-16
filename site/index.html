@@ -238,14 +238,16 @@
       </p>
       <p>
         dwm (pronounced "doom") creates, lists, and deletes workspaces stored under
-        <code>&lt;repo&gt;/.dwm/worktrees/&lt;name&gt;/</code>, with a shell wrapper that
+        <code>&lt;repo&gt;.dwm/worktrees/&lt;name&gt;/</code>, with a shell wrapper that
         auto-<code>cd</code>s into the selected workspace. It works with both jj and git
         repositories.
       </p>
       <p>
-        The first time you create a workspace in a repo, dwm adds <code>.dwm/</code> to your ignore
-        rules &mdash; <code>.git/info/exclude</code> for git repos, <code>.gitignore</code> for
-        jj-only repos &mdash; so workspace directories never end up tracked.
+        The workspace directory sits next to the repo rather than inside it, so for
+        <code>~/dev/myrepo</code> workspaces live in <code>~/dev/myrepo.dwm/worktrees/</code>.
+        A jj workspace has no <code>.git</code> of its own, so git and editors that use it walk up
+        to the nearest enclosing repo; keeping workspaces outside the repo means they are never
+        mistaken for ignored files in it, and there is nothing to add to your ignore rules.
       </p>
       <p>
         It provides an interactive TUI picker for browsing and switching between workspaces, with

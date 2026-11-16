@@ -1370,14 +1370,14 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
     let refresh_sender = app.refresh_mailbox.sender();
 
     // Collect unique (repo_name, agent_dir) pairs for agent polling.
-    // Agent statuses live in <repo_root>/.dwm/agent-status, so we read from
-    // <main_repo_path>/.dwm/ for each repo represented in the entry list.
+    // Agent statuses live in <repo_root>.dwm/agent-status, so we read from
+    // the dwm dir of each repo represented in the entry list.
     let repo_dirs: Vec<(String, PathBuf)> = {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for entry in &app.entries {
             if let Some(repo_name) = &entry.repo_name {
-                let agent_dir = entry.main_repo_path.join(".dwm");
+                let agent_dir = crate::workspace::dwm_dir(&entry.main_repo_path);
                 if seen.insert(agent_dir.clone()) {
                     out.push((repo_name.clone(), agent_dir));
                 }
