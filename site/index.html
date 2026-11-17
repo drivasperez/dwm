@@ -362,10 +362,16 @@ copy_mode = "auto"
 # Git only; opt in to experimental tracked-file sharing:
 # checkout = "cow"</code></pre>
       <p>Paths are literal and relative. Files must be ignored in both workspaces;
-        tracked files and existing destination files are never overwritten.
+        tracked files and existing destination files are never overwritten. Files
+        not ignored at the new workspace&#39;s revision are skipped with a warning, or
+        fail creation with <code>copy_unignored = "error"</code>.
         <code>--from</code> selects the copy source. Keep source artifacts idle while
         copying and let setup reconcile dependencies. Symlinks keep their original
         targets; environments containing absolute paths may need rebuilding.</p>
+      <p>A <code>.worktreeinclude</code> file at the source root, Claude Code&#39;s
+        convention, is also honoured: it uses <code>.gitignore</code> syntax, and every
+        ignored file matching one of its patterns is copied alongside the
+        <code>copy</code> entries.</p>
       <p>Experimental Git checkout sharing reports fallback for unsupported filesystems,
         hooks, attributes, and other unproven configurations. It currently trades
         additional verification time for reduced disk allocation. Failed population
