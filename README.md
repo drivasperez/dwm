@@ -8,13 +8,13 @@ The workspace directory sits next to the repo rather than inside it, so for `~/d
 
 ## Install
 
-Cargo:
+Shell installer (macOS and Linux):
 
 ```sh
-cargo install dwm
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/drivasperez/dwm/releases/latest/download/dwm-installer.sh | sh
 ```
 
-Pre-built binaries and a shell installer are available on the [latest GitHub release](https://github.com/drivasperez/dwm/releases/latest).
+Pre-built binaries are also available on the [latest GitHub release](https://github.com/drivasperez/dwm/releases/latest).
 
 ## Shell setup
 
