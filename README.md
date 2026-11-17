@@ -110,10 +110,30 @@ original targets, including absolute targets outside the workspace.
 
 The source is the main repository, or the named workspace with `--from`. Entries
 are literal relative paths, not glob patterns. Only files ignored at both source
-and destination are copied; tracked files and VCS/dwm metadata are excluded.
+and destination are copied; tracked files and VCS/dwm metadata are excluded. A
+file that is ignored in the source but not at the new workspace's revision (for
+example because the source has an uncommitted `.gitignore` change) is skipped
+with a warning. Set `copy_unignored = "error"` under `[workspace]` to make
+`dwm new` fail instead, before anything is copied.
 Existing destination files are never overwritten. Missing sources are reported
 and skipped. Keep source build/dependency directories idle while copying: this
 is not an atomic snapshot of a running build.
+
+dwm also honours Claude Code's `.worktreeinclude`
+convention, so a repository already set up for Claude Code worktrees needs no extra
+configuration. Put a `.worktreeinclude` at the root of the source workspace using
+`.gitignore` syntax:
+
+```gitignore
+.env
+.env.local
+config/secrets.json
+```
+
+Every file matching a pattern is copied, as long as it is also ignored; matches that
+are tracked or not ignored are skipped, so the file can never duplicate committed
+content. These files go through the same checks, copy mode and conflict rules as
+`copy` entries, and both sources can be used together.
 
 Setup still runs afterward to reconcile dependencies with the destination's
 lockfile. Some artifacts, notably Python virtual environments and caches with

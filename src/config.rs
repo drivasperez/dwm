@@ -11,6 +11,20 @@ pub enum CopyMode {
     Copy,
 }
 
+/// What to do with a file selected for copying (via `copy` or
+/// `.worktreeinclude`) that is ignored in the source but not at the new
+/// workspace's revision. Copying it would create an untracked, unignored file
+/// that is easy to commit by accident.
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyUnignored {
+    /// Leave the file out and print a warning.
+    #[default]
+    Skip,
+    /// Fail workspace creation before copying anything.
+    Error,
+}
+
 #[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Checkout {
@@ -24,6 +38,7 @@ pub enum Checkout {
 pub struct WorkspaceConfig {
     pub copy: Vec<PathBuf>,
     pub copy_mode: CopyMode,
+    pub copy_unignored: CopyUnignored,
     pub checkout: Checkout,
 }
 
@@ -105,6 +120,18 @@ mod tests {
         assert_eq!(cfg.workspace.copy, [PathBuf::from("target")]);
         assert_eq!(cfg.workspace.copy_mode, CopyMode::Copy);
         assert!(parse_toml("[workspace]\ncheckout = 'unknown'").is_err());
+        assert_eq!(
+            parse_toml("").unwrap().workspace.copy_unignored,
+            CopyUnignored::Skip
+        );
+        assert_eq!(
+            parse_toml("[workspace]\ncopy_unignored = 'error'")
+                .unwrap()
+                .workspace
+                .copy_unignored,
+            CopyUnignored::Error
+        );
+        assert!(parse_toml("[workspace]\ncopy_unignored = 'warn'").is_err());
         assert!(parse_toml("[workspace]\ncoppy = []").is_err());
     }
 
