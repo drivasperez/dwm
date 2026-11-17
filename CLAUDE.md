@@ -30,6 +30,7 @@ Every bug fix should include a regression test. New parsing functions and utilit
 - **`cli.rs`** — Clap derive structs. Subcommands: `new`, `list`, `status`, `switch`, `rename`, `delete`, `prune`, `setup`.
 - **`vcs.rs`** — VCS abstraction layer. Defines `VcsBackend` trait, `VcsType` enum, and owns `WorkspaceInfo` and `DiffStat` structs shared across backends.
 - **`jj.rs`** — jj backend implementing `VcsBackend`. Runs `jj` as a subprocess via `Command`. Parsing functions for jj output are pure and unit-tested.
+- **`jj_workspace_store.rs`** — Reads and rewrites jj's `.jj/repo/workspace_store/index` (a small protobuf) so a workspace's recorded path follows it when dwm moves the directory. No jj command does this. Takes jj's `index.lock` flock and refuses any field it doesn't recognise.
 - **`git.rs`** — Git backend implementing `VcsBackend`. Runs `git` as a subprocess via `Command`.
 - **`workspace.rs`** — Business logic: workspace creation/deletion/listing/renaming/switching. Manages the per-repo `<repo-root>.dwm/` directory and a cross-platform repo registry (`dirs::data_dir()/dwm/repos.txt`) used by `list --all`. `WorkspaceEntry` is the main data struct passed to the TUI.
 - **`tui.rs`** — Ratatui-based interactive table picker. Renders `WorkspaceEntry` data in a 6-column table (Name, Change, Description, Bookmarks, Modified, Changes).

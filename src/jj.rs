@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -376,6 +377,13 @@ impl VcsBackend for JjBackend {
         run_jj_in(old_path, &["workspace", "rename", new_name])?;
         // Then move the directory
         std::fs::rename(old_path, new_path)?;
+        if let Err(e) = crate::jj_workspace_store::record_workspace_path(new_path, new_name) {
+            eprintln!(
+                "{} could not record the new path in jj's workspace index: {:#}",
+                "warning:".yellow(),
+                e
+            );
+        }
         Ok(())
     }
 
