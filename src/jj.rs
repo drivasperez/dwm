@@ -127,17 +127,37 @@ fn parse_workspace_info(output: &str) -> Result<Vec<(String, WorkspaceInfo)>> {
     Ok(results)
 }
 
-/// Format a workspace name as a jj revset operand, quoting it if it contains
-/// characters that are not valid in a bare identifier (e.g. spaces).
+/// Format a workspace name as a jj revset operand (`"name"@`).
+///
+/// The name is always written as a double-quoted string literal rather than
+/// a bare symbol, so no name can be misread as revset syntax (a bare `x-@`
+/// would mean the parents of `x`). jj has no backtick quoting; see
+/// [`jj_string_literal`].
 fn revset_ws(name: &str) -> String {
-    if name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        format!("{}@", name)
-    } else {
-        format!("`{}`@", name)
+    format!("{}@", jj_string_literal(name))
+}
+
+/// Quote `s` as a double-quoted jj string literal (valid in both revsets and
+/// templates), escaping `"`, `\` and control characters with the escapes jj
+/// supports (see "StringLiteral type" in `jj help -k templates`). Other UTF-8
+/// characters are allowed verbatim.
+fn jj_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str(r#"\""#),
+            '\\' => out.push_str(r"\\"),
+            '\t' => out.push_str(r"\t"),
+            '\r' => out.push_str(r"\r"),
+            '\n' => out.push_str(r"\n"),
+            '\0' => out.push_str(r"\0"),
+            c if c.is_ascii_control() => out.push_str(&format!(r"\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
     }
+    out.push('"');
+    out
 }
 
 /// Revset naming the revision a workspace is currently on. The main workspace
@@ -276,8 +296,11 @@ fn unpushed_revset(ws_rev: &str) -> String {
 /// workspace's working-copy commit, and the first description line,
 /// NUL-separated with `\0\n` between records.
 fn unpushed_template(ws_rev: &str) -> String {
+    // `ws_rev` contains quotes of its own, so it must be escaped to sit
+    // inside the template's string literal.
+    let ws_rev = jj_string_literal(ws_rev);
     format!(
-        r#"change_id.shortest(8) ++ "\0" ++ self.contained_in("{ws_rev}") ++ "\0" ++ description.first_line() ++ "\0\n""#
+        r#"change_id.shortest(8) ++ "\0" ++ self.contained_in({ws_rev}) ++ "\0" ++ description.first_line() ++ "\0\n""#
     )
 }
 
@@ -510,6 +533,92 @@ mod tests {
         assert_eq!(latest_description(dir, "missing-workspace"), "");
     }
 
+    /// Workspace names that aren't valid bare revset symbols must still
+    /// resolve in every query dwm builds from them.
+    #[test]
+    fn workspace_revsets_resolve_names_needing_quotes() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        jj_test_command(&dir, &["git", "init"]);
+        jj_test_command(&dir, &["describe", "-m", "trunk"]);
+        jj_test_command(&dir, &["bookmark", "create", "main", "-r", "@"]);
+        jj_test_command(
+            &dir,
+            &[
+                "config",
+                "set",
+                "--repo",
+                r#"revset-aliases."trunk()""#,
+                "main",
+            ],
+        );
+        // Keep trunk mutable so moving `main` onto a workspace's commit
+        // doesn't make jj start a fresh working-copy commit on top of it.
+        jj_test_command(
+            &dir,
+            &[
+                "config",
+                "set",
+                "--repo",
+                r#"revset-aliases."immutable_heads()""#,
+                "none()",
+            ],
+        );
+
+        for (i, name) in [
+            "fix.bug",
+            "feat/login",
+            r#"we"ird\name"#,
+            "my feature",
+            "x-",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ws_dir = repo.path().join(format!("ws{i}"));
+            jj_test_command(
+                &dir,
+                &[
+                    "workspace",
+                    "add",
+                    "--name",
+                    name,
+                    "-r",
+                    "main",
+                    ws_dir.to_str().unwrap(),
+                ],
+            );
+            let description = format!("work on {name}");
+            jj_test_command(&ws_dir, &["describe", "-m", &description]);
+
+            assert_eq!(latest_description(&dir, name), description, "{name}");
+            assert!(
+                !JjBackend.is_merged_into_trunk(&dir, &ws_dir, name),
+                "{name} has unmerged work"
+            );
+
+            // The prune template embeds the workspace revset in a string
+            // literal, so it must recognise the working-copy commit too.
+            std::fs::write(ws_dir.join("wip.txt"), &description).unwrap();
+            assert_eq!(
+                JjBackend.prune_verdict(&dir, &ws_dir, name),
+                PruneVerdict::Keep("working copy has uncommitted changes".to_string()),
+                "{name}"
+            );
+
+            let commit = jj_test_command(
+                &ws_dir,
+                &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+            );
+            jj_test_command(&dir, &["bookmark", "set", "main", "-r", commit.trim()]);
+            assert!(
+                JjBackend.is_merged_into_trunk(&dir, &ws_dir, name),
+                "{name} is merged"
+            );
+        }
+    }
+
     #[test]
     fn description_fallback_prefers_descendant_over_newer_ancestor_timestamp() {
         let repo = tempfile::tempdir().unwrap();
@@ -617,8 +726,8 @@ mod tests {
     #[test]
     fn workspace_revision_uses_at_for_main_workspace() {
         assert_eq!(workspace_revision("default"), "@");
-        assert_eq!(workspace_revision("feature"), "feature@");
-        assert_eq!(workspace_revision("my feature"), "`my feature`@");
+        assert_eq!(workspace_revision("feature"), r#""feature"@"#);
+        assert_eq!(workspace_revision("my feature"), r#""my feature"@"#);
     }
 
     #[test]
@@ -629,16 +738,16 @@ mod tests {
 
     #[test]
     fn revset_ws_simple_name() {
-        assert_eq!(revset_ws("feature"), "feature@");
-        assert_eq!(revset_ws("default"), "default@");
-        assert_eq!(revset_ws("my-branch"), "my-branch@");
-        assert_eq!(revset_ws("with_underscore"), "with_underscore@");
+        assert_eq!(revset_ws("feature"), r#""feature"@"#);
+        assert_eq!(revset_ws("default"), r#""default"@"#);
+        assert_eq!(revset_ws("my-branch"), r#""my-branch"@"#);
+        assert_eq!(revset_ws("with_underscore"), r#""with_underscore"@"#);
     }
 
     #[test]
     fn revset_ws_name_with_spaces() {
-        assert_eq!(revset_ws("my feature"), "`my feature`@");
-        assert_eq!(revset_ws("work in progress"), "`work in progress`@");
+        assert_eq!(revset_ws("my feature"), r#""my feature"@"#);
+        assert_eq!(revset_ws("work in progress"), r#""work in progress"@"#);
     }
 
     #[test]
@@ -715,6 +824,14 @@ mod tests {
     }
 
     #[test]
+    fn unpushed_template_escapes_workspace_revset() {
+        assert_eq!(
+            unpushed_template(&revset_ws(r#"we"ird"#)),
+            r#"change_id.shortest(8) ++ "\0" ++ self.contained_in("\"we\\\"ird\"@") ++ "\0" ++ description.first_line() ++ "\0\n""#
+        );
+    }
+
+    #[test]
     fn unpushed_revset_excludes_empty_and_remote_reachable() {
         assert_eq!(
             unpushed_revset("ws@"),
@@ -724,7 +841,17 @@ mod tests {
 
     #[test]
     fn revset_ws_name_with_special_chars() {
-        assert_eq!(revset_ws("feat/login"), "`feat/login`@");
-        assert_eq!(revset_ws("fix.bug"), "`fix.bug`@");
+        assert_eq!(revset_ws("feat/login"), r#""feat/login"@"#);
+        assert_eq!(revset_ws("fix.bug"), r#""fix.bug"@"#);
+        assert_eq!(revset_ws("x-"), r#""x-"@"#);
+        assert_eq!(revset_ws("café"), r#""café"@"#);
+    }
+
+    #[test]
+    fn revset_ws_escapes_quotes_backslashes_and_control_chars() {
+        assert_eq!(revset_ws(r#"we"ird"#), r#""we\"ird"@"#);
+        assert_eq!(revset_ws(r"back\slash"), r#""back\\slash"@"#);
+        assert_eq!(revset_ws("tab\tnl\ncr\rnul\0"), r#""tab\tnl\ncr\rnul\0"@"#);
+        assert_eq!(revset_ws("bell\u{7}del\u{7f}"), r#""bell\x07del\x7f"@"#);
     }
 }
