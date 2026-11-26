@@ -78,11 +78,11 @@ cd "$(dwm lease agents)"   # or: dwm lease agents --at <rev>
 dwm release
 ```
 
-It reuses the lowest-numbered member that isn't leased, isn't open in a Rex pane, and has nothing to lose by the same rules as `dwm prune`, moving it to a fresh change on trunk (or `--at <rev>`): for jj a new change on that revision, for git its branch reset to it. Members with uncommitted or unpushed work are skipped, and when none is free dwm creates the next member, running your setup hooks as `dwm new` does. Leasing takes a lock, so agents leasing at the same time never get the same workspace.
+It reuses the lowest-numbered member that isn't leased, isn't open in a Rex pane, and has nothing to lose by the same rules as `dwm prune`, moving it to a fresh change on trunk (or `--at <rev>`): for jj a new change on that revision, for git its own `<pool>-N` branch reset to it. Members with uncommitted or unpushed work are skipped, and when none is free dwm creates the next member, running your setup hooks as `dwm new` does. Leasing takes a lock, so agents leasing at the same time never get the same workspace.
 
 `dwm setup` offers to install a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) at `~/.claude/skills/dwm/SKILL.md` that teaches agents to lease, use, and release workspaces, and keeps it current when you run setup after updating dwm. For other agents, `dwm skill` prints the same text.
 
-A lease lasts until `dwm release`. A lease taken from a Rex pane also ends when that pane closes, so a crashed agent doesn't hold its workspace forever. `dwm prune` keeps leased workspaces, and `dwm status --json` shows each lease.
+A lease lasts until `dwm release`. A lease taken from a Rex pane also ends when that pane closes, so a crashed agent doesn't hold its workspace forever. `dwm prune` keeps leased workspaces, and `dwm status --json` shows each lease that still holds.
 
 ## Setup hooks
 

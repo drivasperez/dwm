@@ -34,6 +34,23 @@ local function list_workspaces(cwd)
   return rex.json.decode(r.stdout)
 end
 
+-- Whether `dir` is inside a jj or git repository, so `dwm list` can run
+-- there. Uses only tools in Rex's own minimal PATH.
+local function in_repository(dir)
+  if dir == nil then
+    return false
+  end
+  local script = [[
+d="$1"
+while :; do
+  if [ -e "$d/.jj" ] || [ -e "$d/.git" ]; then exit 0; fi
+  [ "$d" = / ] && exit 1
+  d=$(dirname "$d")
+done]]
+  local r = rex.exec({ "/bin/sh", "-c", script, "sh", dir }, { timeout = 5 })
+  return r ~= nil and r.ok
+end
+
 local function agent_detail(agents)
   if agents == nil then
     return nil
@@ -67,8 +84,15 @@ rex.action({
     -- own picker in a floating pane instead; it focuses or opens a session for
     -- the chosen workspace the same way, then exits and the pane closes.
     if rex.ui == nil or rex.ui.pick == nil then
-      local argv = { "/usr/bin/env", "DWM_REX_THROWAWAY_PANE=1", DWM, "list" }
-      if cwd == nil then
+      local argv = {
+        "/usr/bin/env",
+        "PATH=" .. PATH,
+        "DWM_REX_BIN=" .. REX,
+        "DWM_REX_THROWAWAY_PANE=1",
+        DWM,
+        "list",
+      }
+      if not in_repository(cwd) then
         table.insert(argv, "--all")
       end
       local _, err = rex.session.new_layer({

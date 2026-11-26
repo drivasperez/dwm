@@ -604,12 +604,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     let color = if dim {
                         Color::DarkGray
                     } else {
-                        match summary.most_urgent() {
-                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
-                            Some(crate::agent::AgentStatus::Working) => Color::Green,
-                            Some(crate::agent::AgentStatus::Done) => Color::Cyan,
-                            _ => Color::DarkGray,
-                        }
+                        summary.most_urgent().map_or(Color::DarkGray, status_color)
                     };
                     (summary.to_string(), color)
                 }
@@ -1268,12 +1263,7 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
                     let color = if dim {
                         Color::DarkGray
                     } else {
-                        match summary.most_urgent() {
-                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
-                            Some(crate::agent::AgentStatus::Working) => Color::Green,
-                            Some(crate::agent::AgentStatus::Done) => Color::Cyan,
-                            _ => Color::DarkGray,
-                        }
+                        summary.most_urgent().map_or(Color::DarkGray, status_color)
                     };
                     (summary.to_string(), color)
                 }
@@ -1552,6 +1542,7 @@ mod tests {
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
             rex_pane: None,
+            lease: None,
         }
     }
 
@@ -1628,6 +1619,7 @@ mod tests {
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
             rex_pane: None,
+            lease: None,
         }
     }
 
@@ -1770,6 +1762,7 @@ mod tests {
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
             rex_pane: None,
+            lease: None,
         }
     }
 

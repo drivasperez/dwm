@@ -213,11 +213,11 @@ pub fn summaries_from_panes(panes: &[crate::rex::Pane]) -> RexSummaries {
         let (Some(cwd), Some(status)) = (&pane.cwd, pane.agent_status()) else {
             continue;
         };
-        let Some((dwm, ws_name)) = resolve_workspace_from_cwd(cwd) else {
+        let Some((dwm, ws_name)) = resolve_workspace_for_status(cwd) else {
             continue;
         };
         let summary = out
-            .entry(crate::rex::real_path(&dwm))
+            .entry(status_key(&dwm))
             .or_default()
             .entry(ws_name)
             .or_default();
@@ -247,7 +247,7 @@ pub fn combine_summaries(
     mut from_files: HashMap<String, AgentSummary>,
     rex: Option<&RexSummaries>,
 ) -> HashMap<String, AgentSummary> {
-    if let Some(from_rex) = rex.and_then(|r| r.get(&crate::rex::real_path(repo_dir))) {
+    if let Some(from_rex) = rex.and_then(|r| r.get(&status_key(repo_dir))) {
         for (ws, summary) in from_rex {
             from_files.insert(ws.clone(), summary.clone());
         }
@@ -372,6 +372,45 @@ fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
         }
     }
     None
+}
+
+/// Like [`resolve_workspace_from_cwd`], but a repo needn't have a `<repo>.dwm/`
+/// directory yet: a pane anywhere in a repo counts toward its main
+/// workspace. Only for reading status; the hook handler must not create dwm
+/// directories in every repo an agent runs in.
+fn resolve_workspace_for_status(cwd: &Path) -> Option<(PathBuf, String)> {
+    if let Some((root, ws_name, _)) = workspace::find_dwm_workspace(cwd) {
+        return Some((workspace::dwm_dir(&root), ws_name));
+    }
+    let mut current = cwd.to_path_buf();
+    loop {
+        let vcs = if current.join(".jj").is_dir() {
+            Some(VcsType::Jj)
+        } else if current.join(".git").exists() {
+            Some(VcsType::Git)
+        } else {
+            None
+        };
+        if let Some(vcs) = vcs {
+            return Some((
+                workspace::dwm_dir(&current),
+                vcs.main_workspace_name().to_string(),
+            ));
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// The key a repo's Rex summaries are stored under: its `<repo>.dwm/` path
+/// with symlinks resolved in the parent, which exists even when the dwm
+/// directory doesn't.
+fn status_key(dwm: &Path) -> PathBuf {
+    match (dwm.parent(), dwm.file_name()) {
+        (Some(parent), Some(name)) => crate::rex::real_path(parent).join(name),
+        _ => dwm.to_path_buf(),
+    }
 }
 
 /// Process a Claude Code hook event from stdin and update agent status files.
@@ -833,7 +872,7 @@ mod tests {
         panes[1].records[0].msg = Some("Allow edit to src/foo.rs?".into());
         let map = summaries_from_panes(&panes);
         assert_eq!(map.len(), 1, "{map:?}");
-        let repo_map = &map[&crate::rex::real_path(&workspace::dwm_dir(&repo))];
+        let repo_map = &map[&status_key(&workspace::dwm_dir(&repo))];
         let feat = &repo_map["feat"];
         assert_eq!((feat.working, feat.waiting, feat.idle), (1, 1, 0));
         let note = feat.top_note().unwrap();
@@ -842,6 +881,25 @@ mod tests {
             (AgentStatus::Waiting, "Allow edit to src/foo.rs?")
         );
         assert_eq!(repo_map["default"].done, 1);
+    }
+
+    #[test]
+    fn rex_status_reaches_main_workspace_of_repo_without_dwm_dir() {
+        // Regression: a repo that never had a workspace has no `<repo>.dwm/`,
+        // so its main workspace showed a Rex pane but no agent status.
+        use crate::rex::ProgramState::Working;
+        use crate::rex::tests::pane;
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("fresh");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        let dwm = workspace::dwm_dir(&repo);
+        assert!(!dwm.exists());
+
+        let rex = summaries_from_panes(&[pane("1", "s", &repo.join("src"), &[Working])]);
+        let combined = read_agent_summaries_with(&dwm, Some(&rex));
+        assert_eq!(combined["default"].working, 1);
+        assert!(!dwm.exists(), "reading status must not create the dwm dir");
     }
 
     #[test]
@@ -862,7 +920,7 @@ mod tests {
         feat.add(AgentStatus::Done);
         from_rex.insert("feat".to_string(), feat.clone());
         let mut rex = RexSummaries::new();
-        rex.insert(crate::rex::real_path(&dwm), from_rex);
+        rex.insert(status_key(&dwm), from_rex);
 
         let combined = read_agent_summaries_with(&dwm, Some(&rex));
         assert_eq!(combined["feat"], feat, "Rex wins where it has panes");

@@ -700,6 +700,8 @@ fn release_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result
             (root, ws)
         }
     };
+    // The name becomes a file path under leases/.
+    validate_workspace_name(&name)?;
     let dwm = dwm_dir(&root);
     let _lock = pool::lock(&dwm)?;
     if pool::remove_lease(&dwm, &name)? {
@@ -1397,6 +1399,8 @@ fn list_entries_with_panes(
     let mut entries = Vec::with_capacity(candidates.len());
     for (c, comp) in candidates.into_iter().zip(computed) {
         let agent_status = agent_summaries.remove(&c.name);
+        let lease = pool::read_lease(&dwm, &c.name)
+            .filter(|l| pool::lease_state(l, panes) == pool::LeaseState::Held);
         let rex_pane = panes.and_then(|p| {
             rex::pick_pane(&rex::panes_inside(p, &c.path, None)).map(rex::PaneRef::from)
         });
@@ -1415,6 +1419,7 @@ fn list_entries_with_panes(
             vcs_type,
             agent_status,
             rex_pane,
+            lease,
         });
     }
 
@@ -1442,6 +1447,8 @@ pub struct WorkspaceEntry {
     pub agent_status: Option<agent::AgentSummary>,
     /// A Rex pane open in the workspace, when dwm runs inside Rex.
     pub rex_pane: Option<rex::PaneRef>,
+    /// The workspace's lease, if one still holds it.
+    pub lease: Option<pool::Lease>,
 }
 
 /// Determine whether a non-main workspace should be shown as stale.
@@ -1565,7 +1572,7 @@ fn status_json(entries: &[WorkspaceEntry]) -> serde_json::Value {
                 "agents": e.agent_status.as_ref().filter(|s| !s.is_empty()),
                 "rex_pane": e.rex_pane,
                 "session_label": session_label_for(&e.path),
-                "lease": pool::read_lease(&dwm_dir(&e.main_repo_path), &e.name),
+                "lease": e.lease,
             })
         })
         .collect();
@@ -3323,6 +3330,7 @@ mod tests {
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
                 rex_pane: None,
+                lease: None,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -3339,6 +3347,7 @@ mod tests {
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
                 rex_pane: None,
+                lease: None,
             },
         ];
         // Should not panic; output goes to stderr
@@ -3372,6 +3381,7 @@ mod tests {
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
                 rex_pane: None,
+                lease: None,
             },
             WorkspaceEntry {
                 name: "hazy-quail".to_string(),
@@ -3398,6 +3408,7 @@ mod tests {
                     notes: Vec::new(),
                 }),
                 rex_pane: None,
+                lease: None,
             },
         ];
 
@@ -4716,13 +4727,16 @@ mod tests {
 
         let first = lease();
         assert_eq!(first, worktrees_dir(&repo).join("agents-1"));
-        // Work that reached the remote is safe to discard on reuse.
+        // Work that reached the remote is safe to discard on reuse, even on a
+        // branch of the agent's own.
+        run_ok(&first, "git", &["checkout", "-q", "-b", "fix-123"]);
         run_ok(
             &first,
             "git",
             &["commit", "-q", "--allow-empty", "-m", "pushed work"],
         );
-        run_ok(&first, "git", &["push", "-q", "-u", "origin", "agents-1"]);
+        run_ok(&first, "git", &["push", "-q", "-u", "origin", "fix-123"]);
+        let fix_before = run_ok(&repo, "git", &["rev-parse", "fix-123"]);
         run_ok(
             &repo,
             "git",
@@ -4734,7 +4748,10 @@ mod tests {
         let head = run_ok(&first, "git", &["log", "-1", "--format=%s"]);
         assert_eq!(head.trim(), "trunk moves", "reset to the current trunk");
         let branch = run_ok(&first, "git", &["branch", "--show-current"]);
-        assert_eq!(branch.trim(), "agents-1", "still on its own branch");
+        assert_eq!(branch.trim(), "agents-1", "back on its own branch");
+        // Regression: the reset used to move whatever branch was checked out.
+        let fix_after = run_ok(&repo, "git", &["rev-parse", "fix-123"]);
+        assert_eq!(fix_before, fix_after, "the agent's branch is untouched");
 
         // An uncommitted change makes a released member unusable.
         fs::write(first.join("wip.txt"), "wip").unwrap();
@@ -5295,6 +5312,22 @@ mod tests {
         }
 
         #[test]
+        fn release_rejects_names_that_escape_the_leases_dir() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, deps, _) = pool_fixture(tmp.path(), None, &[]);
+            let victim = dwm_dir(&main_repo).join("victim.json");
+            fs::create_dir_all(dwm_dir(&main_repo)).unwrap();
+            fs::write(&victim, "{}").unwrap();
+            for bad in ["../victim", "a/b", ".."] {
+                assert!(
+                    release_workspace_inner(&deps, Some(bad.into())).is_err(),
+                    "{bad}"
+                );
+            }
+            assert!(victim.exists());
+        }
+
+        #[test]
         fn prune_keeps_leased_workspaces() {
             let tmp = tempfile::tempdir().unwrap();
             let (main_repo, deps, _) = pool_fixture(
@@ -5314,6 +5347,43 @@ mod tests {
                 "{:?}",
                 outcome.verdicts
             );
+        }
+
+        #[test]
+        fn status_json_omits_leases_whose_rex_pane_closed() {
+            // Regression: `status --json` reported a lease as held after its
+            // pane closed, while `lease` and `prune` already treated it as ended.
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let fake = FakeRex::new(vec![pane("block:alive", "x", &main_repo, &[])], true);
+            let (main_repo, deps, _) = pool_fixture(
+                tmp.path(),
+                Some(&fake),
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable),
+                    ("agents-2", vcs::PruneVerdict::Prunable),
+                    ("agents-3", vcs::PruneVerdict::Prunable),
+                ],
+            );
+            let dwm = dwm_dir(&main_repo);
+            pool::write_lease(&dwm, &pool::Lease::new("agents-1", Some("block:gone"))).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new("agents-2", Some("block:alive"))).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new("agents-3", None)).unwrap();
+
+            let entries = list_workspace_entries_inner(&deps).unwrap();
+            let json = status_json(&entries);
+            let lease_of = |name: &str| {
+                json["workspaces"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|w| w["name"] == name)
+                    .unwrap()["lease"]
+                    .clone()
+            };
+            assert!(lease_of("agents-1").is_null(), "its pane closed");
+            assert_eq!(lease_of("agents-2")["rex_block"], "block:alive");
+            assert_eq!(lease_of("agents-3")["workspace"], "agents-3");
         }
 
         #[test]

@@ -361,22 +361,16 @@ impl VcsBackend for GitBackend {
         &self,
         repo_dir: &Path,
         worktree_dir: &Path,
-        _ws_name: &str,
+        ws_name: &str,
         revision: &str,
     ) -> Result<()> {
         let commit = self.resolve_revision(repo_dir, revision)?;
-        // Keep the worktree on its own branch, moved to the new start, so
-        // it isn't left with a stale branch or a detached HEAD it didn't have.
-        match run_git_in(
-            worktree_dir,
-            &["symbolic-ref", "--quiet", "--short", "HEAD"],
-        ) {
-            Ok(branch) => {
-                run_git_in(worktree_dir, &["checkout", "-B", branch.trim(), &commit])?;
-            }
-            Err(_) => {
-                run_git_in(worktree_dir, &["checkout", "--detach", &commit])?;
-            }
+        // Put the worktree back on the branch named after it. Resetting
+        // whatever branch it was left on would move an unrelated branch the
+        // last user switched to. If that name is checked out in another
+        // worktree, detach rather than fight over it.
+        if run_git_in(worktree_dir, &["checkout", "-B", ws_name, &commit]).is_err() {
+            run_git_in(worktree_dir, &["checkout", "--detach", &commit])?;
         }
         Ok(())
     }

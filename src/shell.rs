@@ -4,11 +4,10 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// Subcommands whose stdout may be a workspace path that the shell wrapper
-/// should `cd` into. This is the single source of truth — both the POSIX and
+/// should `cd` into. `lease` is deliberately absent: scripts and agents
+/// capture its path with `$(dwm lease …)`, which the wrapper would swallow. This is the single source of truth — both the POSIX and
 /// fish wrapper generators read from this list.
-pub const CD_SUBCOMMANDS: &[&str] = &[
-    "new", "list", "switch", "delete", "rename", "prune", "lease",
-];
+pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename", "prune"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -246,6 +245,15 @@ pub fn print_shell_setup(shell: Option<Shell>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_is_not_a_cd_subcommand() {
+        // Regression: with `lease` here, `cd "$(dwm lease agents)"` got an
+        // empty path whenever the wrapper was loaded.
+        assert!(!CD_SUBCOMMANDS.contains(&"lease"));
+        assert!(!posix_function().contains("lease"));
+        assert!(!fish_function().contains("lease"));
+    }
 
     // --- POSIX (bash/zsh) wrapper structure tests ---
 
