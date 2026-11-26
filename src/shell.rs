@@ -6,7 +6,9 @@ use std::path::PathBuf;
 /// Subcommands whose stdout may be a workspace path that the shell wrapper
 /// should `cd` into. This is the single source of truth — both the POSIX and
 /// fish wrapper generators read from this list.
-pub const CD_SUBCOMMANDS: &[&str] = &["new", "list", "switch", "delete", "rename", "prune"];
+pub const CD_SUBCOMMANDS: &[&str] = &[
+    "new", "list", "switch", "delete", "rename", "prune", "lease",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {

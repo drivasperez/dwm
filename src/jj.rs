@@ -467,6 +467,19 @@ impl VcsBackend for JjBackend {
         .unwrap_or_default()
     }
 
+    fn reset_workspace(
+        &self,
+        _repo_dir: &Path,
+        worktree_dir: &Path,
+        _ws_name: &str,
+        revision: &str,
+    ) -> Result<()> {
+        // Run in the workspace so it is that workspace's @ that moves. jj
+        // abandons the old @ if it was empty and undescribed.
+        run_jj_in(worktree_dir, &["new", revision])?;
+        Ok(())
+    }
+
     fn prune_verdict(&self, repo_dir: &Path, worktree_dir: &Path, ws_name: &str) -> PruneVerdict {
         // Snapshot the workspace first: without it, edits made since the last
         // jj command in that workspace would be invisible to the log below.

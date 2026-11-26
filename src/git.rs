@@ -353,6 +353,34 @@ impl VcsBackend for GitBackend {
         .unwrap_or_default()
     }
 
+    fn trunk_revision(&self, repo_dir: &Path) -> String {
+        self.trunk(repo_dir).to_string()
+    }
+
+    fn reset_workspace(
+        &self,
+        repo_dir: &Path,
+        worktree_dir: &Path,
+        _ws_name: &str,
+        revision: &str,
+    ) -> Result<()> {
+        let commit = self.resolve_revision(repo_dir, revision)?;
+        // Keep the worktree on its own branch, moved to the new start, so
+        // it isn't left with a stale branch or a detached HEAD it didn't have.
+        match run_git_in(
+            worktree_dir,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        ) {
+            Ok(branch) => {
+                run_git_in(worktree_dir, &["checkout", "-B", branch.trim(), &commit])?;
+            }
+            Err(_) => {
+                run_git_in(worktree_dir, &["checkout", "--detach", &commit])?;
+            }
+        }
+        Ok(())
+    }
+
     fn prune_verdict(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> PruneVerdict {
         match run_git_in(
             worktree_dir,
