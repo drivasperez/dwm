@@ -62,7 +62,7 @@ pub struct WorkspaceInfo {
 }
 
 /// Parsed summary line from `jj diff --stat` or `git diff --stat`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct DiffStat {
     pub files_changed: u32,
     pub insertions: u32,
@@ -179,6 +179,24 @@ pub trait VcsBackend: Send + Sync {
         _ws_name: &str,
     ) -> PruneVerdict {
         PruneVerdict::Keep("pruning is not supported for this backend".to_string())
+    }
+
+    /// The revision a leased pool workspace starts from by default.
+    fn trunk_revision(&self, _repo_dir: &Path) -> String {
+        "trunk()".to_string()
+    }
+
+    /// Point a workspace at a fresh change on `revision`, for reuse from a
+    /// pool. Callers only do this to a workspace whose
+    /// [`VcsBackend::prune_verdict`] is prunable, so nothing is lost.
+    fn reset_workspace(
+        &self,
+        _repo_dir: &Path,
+        _worktree_dir: &Path,
+        _ws_name: &str,
+        _revision: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("reusing workspaces is not supported for this backend")
     }
 }
 

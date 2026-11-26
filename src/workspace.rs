@@ -5,7 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{agent, hooks, names, vcs};
+use crate::rex::{self, RexApi, Shown};
+use crate::{agent, hooks, names, pool, vcs};
 
 /// Whether a workspace's changes have been merged into trunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,47 @@ pub enum DeleteOutput {
     Verbose,
     /// Suppress progress messages (used by the TUI which owns the alternate screen).
     Quiet,
+}
+
+/// Where `switch`, `new` and the picker put you once the workspace is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Inside Rex, focus a pane already in the workspace or open a session
+    /// for it. Elsewhere, change directory.
+    Rex,
+    /// Always change the current shell's directory.
+    Here,
+}
+
+/// Whether a person is at the terminal dwm runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terminal {
+    Interactive,
+    /// Run by an agent or a script, with no one watching stderr.
+    Unattended,
+}
+
+/// The placement to use for a request. An unattended dwm, such as one an
+/// agent runs inside a Rex pane, changes directory rather than opening Rex
+/// sessions and switching the app's view away from what the person is doing.
+pub fn effective_placement(requested: Placement, terminal: Terminal) -> Placement {
+    match terminal {
+        Terminal::Interactive => requested,
+        Terminal::Unattended => Placement::Here,
+    }
+}
+
+/// What `dwm delete` does about Rex panes still open in the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenPanes {
+    /// Refuse to delete, naming the panes.
+    Refuse,
+    /// Ask on the terminal whether to close them.
+    Ask,
+    /// Close them, ending the programs in them. [`OpenPanes::Ask`] does this
+    /// once the person agrees; nothing else asks for it outside tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Close,
 }
 
 /// Return `true` if `cwd` is equal to or a subdirectory of `ws_path`.
@@ -218,6 +260,8 @@ fn read_and_prune_registry() -> Result<Vec<PathBuf>> {
 struct WorkspaceDeps {
     backend: Box<dyn vcs::VcsBackend>,
     cwd: PathBuf,
+    /// The Rex server, when dwm runs inside Rex.
+    rex: Option<Box<dyn crate::rex::RexApi>>,
 }
 
 /// Resolve the repo root for the current working directory, whether the cwd
@@ -233,23 +277,61 @@ fn resolve_repo_root(deps: &WorkspaceDeps) -> Result<PathBuf> {
 /// Create a new workspace, auto-detecting the VCS from the current directory.
 ///
 /// Prints the new workspace path to stdout so the shell wrapper can `cd` into it.
-pub fn new_workspace(name: Option<String>, at: Option<&str>, from: Option<&str>) -> Result<()> {
+pub fn new_workspace(
+    name: Option<String>,
+    at: Option<&str>,
+    from: Option<&str>,
+    placement: Placement,
+    command: &[String],
+) -> Result<()> {
+    let report = rex::StatusReport::start(&match &name {
+        Some(n) => format!("Creating workspace {n}"),
+        None => "Creating a workspace".to_string(),
+    });
     let cwd = std::env::current_dir()?;
     // If we're inside a dwm workspace the cwd may be a workspace dir; we still
     // want to detect from the underlying VCS, which works because both jj and
     // git treat the workspace dir as part of the same repo.
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
-    new_workspace_inner(&deps, name, at, from)
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
+    let created = new_workspace_inner(&deps, name, at, from, placement, command)?;
+    report.done(&format!("Created workspace {}", created.name));
+    if let Some(dir) = created.cd {
+        // stdout: path for shell wrapper to cd into
+        println!("{}", dir.display());
+    }
+    Ok(())
+}
+
+/// What [`new_workspace_inner`] made.
+#[derive(Debug)]
+struct NewOutcome {
+    name: String,
+    /// Where the shell should `cd`, unless Rex showed a session instead.
+    cd: Option<PathBuf>,
 }
 
 /// Testable core of [`new_workspace`] that accepts injected [`WorkspaceDeps`].
+///
+/// `command` is typed into a new Rex session opened in the workspace, so it
+/// needs Rex and [`Placement::Rex`].
 fn new_workspace_inner(
     deps: &WorkspaceDeps,
     name: Option<String>,
     at: Option<&str>,
     from: Option<&str>,
-) -> Result<()> {
+    placement: Placement,
+    command: &[String],
+) -> Result<NewOutcome> {
+    if !command.is_empty() && (deps.rex.is_none() || placement == Placement::Here) {
+        bail!(
+            "running a command in the new workspace needs a Rex session; run dwm inside Rex without --here"
+        );
+    }
     let root = resolve_repo_root(deps)?;
     let worktrees = worktrees_dir(&root);
     fs::create_dir_all(&worktrees)?;
@@ -342,19 +424,321 @@ fn new_workspace_inner(
     };
     hooks::run_setup(&config.scripts, &hook_ctx)?;
 
-    // stdout: path for shell wrapper to cd into
-    println!("{}", ws_path.display());
+    let cd = open_new_workspace(deps.rex.as_deref(), &ws_name, &ws_path, placement, command)?;
+    Ok(NewOutcome { name: ws_name, cd })
+}
+
+/// Take the person into a workspace that was just created. Inside Rex that
+/// means a new session for it, running `command` if one was given. Returns
+/// where the shell should `cd` when no session was shown.
+fn open_new_workspace(
+    rex: Option<&dyn RexApi>,
+    ws_name: &str,
+    ws_path: &Path,
+    placement: Placement,
+    command: &[String],
+) -> Result<Option<PathBuf>> {
+    let cd = Some(ws_path.to_path_buf());
+    let Some(rex) = rex else { return Ok(cd) };
+    if placement == Placement::Here {
+        return Ok(cd);
+    }
+    let initial_input =
+        (!command.is_empty()).then(|| format!("{}\r", rex::shell_command_line(command)));
+    let req = rex::OpenSession {
+        label: ws_name.to_string(),
+        cwd: ws_path.to_path_buf(),
+        create: if initial_input.is_some() {
+            rex::CreateWhen::Always
+        } else {
+            rex::CreateWhen::OnlyIfShown
+        },
+        initial_input,
+    };
+    let opened = match rex.open_session(&req) {
+        Ok(o) => o,
+        Err(e) if command.is_empty() => {
+            eprintln!(
+                "{} could not open a Rex session: {e:#}",
+                "warning:".yellow()
+            );
+            return Ok(cd);
+        }
+        Err(e) => return Err(e.context("could not open a Rex session for the command")),
+    };
+    match opened.shown {
+        Shown::Yes => {
+            eprintln!("{} opened Rex session '{}'", "→".cyan(), ws_name.bold());
+            Ok(None)
+        }
+        Shown::No(reason) => {
+            if opened.created {
+                eprintln!(
+                    "{} started Rex session '{}', but Rex didn't switch to it",
+                    "→".cyan(),
+                    ws_name.bold()
+                );
+            }
+            warn_not_shown(&reason);
+            Ok(cd)
+        }
+    }
+}
+
+/// Explain why Rex didn't switch sessions. The usual cause is that the Rex
+/// app doesn't take actions from scripts until Remote Control is on.
+fn warn_not_shown(reason: &str) {
+    eprintln!(
+        "{} Rex won't switch sessions for dwm, so changing directory instead. Turn on Remote Control in Rex's Settings > General, or pass --here to skip Rex.",
+        "note:".yellow()
+    );
+    eprintln!("  {}", reason.dimmed());
+}
+
+/// The Rex session label for a workspace path: the workspace's name, or the
+/// repo directory's name for the main workspace.
+fn session_label_for(path: &Path) -> String {
+    if let Some((_, name, _)) = find_dwm_workspace(path) {
+        return name;
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Take the person to an existing workspace. Inside Rex, focus a pane already
+/// in it, or open a session for it. Returns where the shell should `cd` when
+/// neither happened, including when the current pane is already there.
+fn go_to_workspace(
+    rex: Option<&dyn RexApi>,
+    cwd: &Path,
+    ws_path: &Path,
+    placement: Placement,
+) -> Result<Option<PathBuf>> {
+    let cd = Some(ws_path.to_path_buf());
+    let Some(rex) = rex else { return Ok(cd) };
+    if placement == Placement::Here {
+        return Ok(cd);
+    }
+    // Already there: just cd, unless this pane is about to close anyway.
+    if rex.current_block().is_some()
+        && rex.current_pane() == rex::CurrentPane::Lasting
+        && is_inside(&rex::real_path(cwd), &rex::real_path(ws_path))
+    {
+        return Ok(cd);
+    }
+    let panes = match rex.panes() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} could not list Rex panes: {e:#}", "warning:".yellow());
+            return Ok(cd);
+        }
+    };
+    let inside = rex::panes_inside(&panes, ws_path, rex.current_block());
+    if let Some(pane) = rex::pick_pane(&inside) {
+        return match rex.focus(pane) {
+            Ok(Shown::Yes) => {
+                eprintln!("{} switched to Rex {}", "→".cyan(), pane.describe());
+                Ok(None)
+            }
+            Ok(Shown::No(reason)) => {
+                warn_not_shown(&reason);
+                Ok(cd)
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} could not focus the Rex pane: {e:#}",
+                    "warning:".yellow()
+                );
+                Ok(cd)
+            }
+        };
+    }
+    let label = session_label_for(ws_path);
+    let req = rex::OpenSession {
+        label: label.clone(),
+        cwd: ws_path.to_path_buf(),
+        initial_input: None,
+        create: rex::CreateWhen::OnlyIfShown,
+    };
+    match rex.open_session(&req) {
+        Ok(rex::Opened {
+            shown: Shown::Yes, ..
+        }) => {
+            eprintln!("{} opened Rex session '{}'", "→".cyan(), label.bold());
+            Ok(None)
+        }
+        Ok(rex::Opened {
+            shown: Shown::No(reason),
+            ..
+        }) => {
+            warn_not_shown(&reason);
+            Ok(cd)
+        }
+        Err(e) => {
+            eprintln!(
+                "{} could not open a Rex session: {e:#}",
+                "warning:".yellow()
+            );
+            Ok(cd)
+        }
+    }
+}
+
+/// Lease a workspace from `pool_name` and print its path to stdout.
+pub fn lease_workspace(pool_name: &str, at: Option<&str>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let backend = vcs::detect(&cwd)?;
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
+    let path = lease_workspace_inner(&deps, pool_name, at)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// Testable core of [`lease_workspace`]. Reuses the lowest-numbered member of
+/// the pool that is not leased, not open in a Rex pane, and has nothing to
+/// lose, moving it to a fresh change on `at` (trunk by default). When none
+/// qualifies, creates the next member. Returns the leased workspace's path.
+fn lease_workspace_inner(
+    deps: &WorkspaceDeps,
+    pool_name: &str,
+    at: Option<&str>,
+) -> Result<PathBuf> {
+    validate_workspace_name(pool_name)?;
+    let root = resolve_repo_root(deps)?;
+    let dwm = dwm_dir(&root);
+    let worktrees = worktrees_dir(&root);
+    fs::create_dir_all(&worktrees)?;
+    let _lock = pool::lock(&dwm)?;
+
+    let rex = deps.rex.as_deref();
+    let panes = rex.and_then(|r| r.panes().ok());
+    let holder = rex.and_then(|r| r.current_block());
+    let revision = match at {
+        Some(rev) => rev.to_string(),
+        None => deps.backend.trunk_revision(&root),
+    };
+
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&worktrees)? {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    let members = pool::members(pool_name, names.iter().map(String::as_str));
+
+    for (_, name) in &members {
+        let ws_path = worktrees.join(name);
+        let busy = if let Some(lease) = pool::read_lease(&dwm, name)
+            && pool::lease_state(&lease, panes.as_deref()) == pool::LeaseState::Held
+        {
+            Some("leased".to_string())
+        } else if let Some(p) = panes.as_deref()
+            && let Some(pane) = rex::panes_inside(p, &ws_path, None).first()
+        {
+            Some(format!("open in Rex {}", pane.describe()))
+        } else {
+            match deps.backend.prune_verdict(&root, &ws_path, name) {
+                vcs::PruneVerdict::Prunable => None,
+                vcs::PruneVerdict::Keep(reason) => Some(reason),
+            }
+        };
+        if let Some(reason) = busy {
+            eprintln!("{} {}: {}", "skip ".dimmed(), name, reason.dimmed());
+            continue;
+        }
+        deps.backend
+            .reset_workspace(&root, &ws_path, name, &revision)
+            .with_context(|| format!("resetting '{name}' to {revision}"))?;
+        pool::write_lease(&dwm, &pool::Lease::new(name, holder))?;
+        eprintln!("{} leased '{}' at {}", "✓".green(), name.bold(), revision);
+        return Ok(ws_path);
+    }
+
+    let name = pool::next_member_name(pool_name, &members);
+    let created = new_workspace_inner(
+        deps,
+        Some(name),
+        Some(&revision),
+        None,
+        Placement::Here,
+        &[],
+    )?;
+    pool::write_lease(&dwm, &pool::Lease::new(&created.name, holder))?;
+    eprintln!(
+        "{} leased new workspace '{}'",
+        "✓".green(),
+        created.name.bold()
+    );
+    Ok(worktrees.join(&created.name))
+}
+
+/// End the lease on a pool workspace, named or inferred from the current
+/// directory, so the next `dwm lease` can reuse it.
+pub fn release_workspace(name: Option<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let backend = vcs::detect(&cwd)?;
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: None,
+    };
+    release_workspace_inner(&deps, name)
+}
+
+fn release_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<()> {
+    let (root, name) = match name {
+        Some(n) => (resolve_repo_root(deps)?, n),
+        None => {
+            let (root, ws, _) = find_dwm_workspace(&deps.cwd)
+                .context("not inside a dwm workspace; provide a workspace name")?;
+            (root, ws)
+        }
+    };
+    // The name becomes a file path under leases/.
+    validate_workspace_name(&name)?;
+    let dwm = dwm_dir(&root);
+    let _lock = pool::lock(&dwm)?;
+    if pool::remove_lease(&dwm, &name)? {
+        eprintln!("{} released '{}'", "✓".green(), name.bold());
+    } else {
+        eprintln!("'{}' was not leased", name);
+    }
+    Ok(())
+}
+
+/// Go to a workspace chosen in the picker by its path. Prints the path for
+/// the shell wrapper when it should `cd` there.
+pub fn switch_to_path(path: &Path, placement: Placement) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let rex = rex::connect();
+    if let Some(dir) = go_to_workspace(rex.as_deref(), &cwd, path, placement)? {
+        println!("{}", dir.display());
+    }
     Ok(())
 }
 
 /// Deletes a workspace. Returns `true` if the cwd was inside the deleted
 /// workspace and a redirect path was printed to stdout.
 /// Delete a workspace by name (or infer from cwd).
-pub fn delete_workspace(name: Option<String>, output: DeleteOutput) -> Result<bool> {
+pub fn delete_workspace(
+    name: Option<String>,
+    output: DeleteOutput,
+    open_panes: OpenPanes,
+) -> Result<bool> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
-    if let Some(redirect) = delete_workspace_inner(&deps, name, output)? {
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
+    if let Some(redirect) = delete_workspace_inner(&deps, name, output, open_panes)? {
         println!("{}", redirect.display());
         Ok(true)
     } else {
@@ -367,6 +751,7 @@ fn delete_workspace_inner(
     deps: &WorkspaceDeps,
     name: Option<String>,
     output: DeleteOutput,
+    open_panes: OpenPanes,
 ) -> Result<Option<PathBuf>> {
     let verbose = output == DeleteOutput::Verbose;
 
@@ -387,6 +772,10 @@ fn delete_workspace_inner(
         bail!("workspace '{}' not found at {}", ws_name, ws_path.display());
     }
 
+    if let Some(rex) = deps.rex.as_deref() {
+        deal_with_open_panes(rex, &ws_name, &ws_path, open_panes)?;
+    }
+
     if verbose {
         eprintln!(
             "{} workspace '{}'...",
@@ -405,6 +794,7 @@ fn delete_workspace_inner(
 
     // Clean up agent status files for this workspace
     agent::remove_agent_statuses_for_workspace(&dwm_dir(&root), &ws_name);
+    let _ = pool::remove_lease(&dwm_dir(&root), &ws_name);
 
     if verbose {
         eprintln!("{} workspace '{}' deleted", "✓".green(), ws_name.bold());
@@ -415,6 +805,97 @@ fn delete_workspace_inner(
     } else {
         Ok(None)
     }
+}
+
+/// Before deleting a workspace, find Rex panes other than dwm's own that are
+/// still in it, and refuse, ask, or close them as `policy` says. Deleting the
+/// directory under a running agent would leave it working in a void.
+fn deal_with_open_panes(
+    rex: &dyn RexApi,
+    ws_name: &str,
+    ws_path: &Path,
+    policy: OpenPanes,
+) -> Result<()> {
+    let panes = match rex.panes() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{} could not check Rex for panes in '{}': {e:#}",
+                "warning:".yellow(),
+                ws_name
+            );
+            return Ok(());
+        }
+    };
+    let inside = rex::panes_inside(&panes, ws_path, rex.current_block());
+    if inside.is_empty() {
+        return Ok(());
+    }
+    let list = inside
+        .iter()
+        .map(|p| p.describe())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let close = match policy {
+        OpenPanes::Close => true,
+        OpenPanes::Refuse => false,
+        OpenPanes::Ask => {
+            eprintln!(
+                "{} workspace '{}' is open in Rex: {}",
+                "!".yellow().bold(),
+                ws_name.bold(),
+                list
+            );
+            eprint!(
+                "  {} Close {} and delete the workspace? [y/N] ",
+                "?".bold().cyan(),
+                if inside.len() == 1 { "it" } else { "them" }
+            );
+            agent::confirm_from_tty()?
+        }
+    };
+    if !close {
+        bail!(
+            "workspace '{}' is open in Rex ({}); close {} first",
+            ws_name,
+            list,
+            if inside.len() == 1 { "it" } else { "them" }
+        );
+    }
+    for pane in inside {
+        rex.close_pane(pane)
+            .with_context(|| format!("closing Rex {}", pane.describe()))?;
+    }
+    Ok(())
+}
+
+/// Why prune must keep a workspace that Rex panes are open in, if any are.
+fn open_panes_verdict(
+    panes: &[rex::Pane],
+    ws_path: &Path,
+    current_block: Option<&str>,
+) -> Option<vcs::PruneVerdict> {
+    let inside = rex::panes_inside(panes, ws_path, current_block);
+    let first = inside.first()?;
+    let more = match inside.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    Some(vcs::PruneVerdict::Keep(format!(
+        "open in Rex {}{more}",
+        first.describe()
+    )))
+}
+
+/// Why prune must keep a leased pool workspace, if it is leased.
+fn leased_verdict(
+    dwm: &Path,
+    ws_name: &str,
+    panes: Option<&[rex::Pane]>,
+) -> Option<vcs::PruneVerdict> {
+    let lease = pool::read_lease(dwm, ws_name)?;
+    (pool::lease_state(&lease, panes) == pool::LeaseState::Held)
+        .then(|| vcs::PruneVerdict::Keep(format!("leased; `dwm release {ws_name}` ends the lease")))
 }
 
 /// Whether `dwm prune` only reports or also deletes.
@@ -429,10 +910,23 @@ pub enum PruneMode {
 /// Delete (or, in [`PruneMode::DryRun`], list) workspaces whose work is safe to
 /// discard. Prints a redirect path to stdout if cwd was inside a deleted one.
 pub fn prune_workspaces(mode: PruneMode) -> Result<()> {
+    let report =
+        (mode == PruneMode::Delete).then(|| rex::StatusReport::start("Pruning workspaces"));
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
-    if let Some(redirect) = prune_workspaces_inner(&deps, mode)?.redirect {
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
+    let outcome = prune_workspaces_inner(&deps, mode)?;
+    if let Some(report) = report {
+        report.done(&match outcome.deleted.len() {
+            1 => "Pruned 1 workspace".to_string(),
+            n => format!("Pruned {n} workspaces"),
+        });
+    }
+    if let Some(redirect) = outcome.redirect {
         println!("{}", redirect.display());
     }
     Ok(())
@@ -477,12 +971,23 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
         return Ok(outcome);
     }
 
+    // Panes don't move between workspaces in the time prune takes, so one
+    // look covers every workspace.
+    let panes = deps.rex.as_deref().and_then(|r| r.panes().ok());
+    let current_block = deps.rex.as_deref().and_then(|r| r.current_block());
+
     let mut failures = 0;
     for name in names {
         let ws_path = worktrees.join(&name);
         // Check immediately before deleting so the verdict is as fresh as
         // possible when acting on it.
-        let verdict = deps.backend.prune_verdict(&root, &ws_path, &name);
+        let verdict = leased_verdict(&dwm_dir(&root), &name, panes.as_deref())
+            .or_else(|| {
+                panes
+                    .as_deref()
+                    .and_then(|p| open_panes_verdict(p, &ws_path, current_block))
+            })
+            .unwrap_or_else(|| deps.backend.prune_verdict(&root, &ws_path, &name));
         match &verdict {
             vcs::PruneVerdict::Keep(reason) => {
                 eprintln!("{} {}: {}", "keep ".yellow(), name.bold(), reason);
@@ -490,7 +995,12 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
             vcs::PruneVerdict::Prunable => match mode {
                 PruneMode::DryRun => eprintln!("{} {}", "prune".green(), name.bold()),
                 PruneMode::Delete => {
-                    match delete_workspace_inner(deps, Some(name.clone()), DeleteOutput::Quiet) {
+                    match delete_workspace_inner(
+                        deps,
+                        Some(name.clone()),
+                        DeleteOutput::Quiet,
+                        OpenPanes::Refuse,
+                    ) {
                         Ok(redirect) => {
                             eprintln!("{} {} deleted", "✓".green(), name.bold());
                             outcome.redirect = outcome.redirect.or(redirect);
@@ -528,12 +1038,18 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
 
 /// Switch to the named workspace by printing its path to stdout for the shell
 /// wrapper to `cd` into.
-pub fn switch_workspace(name: &str) -> Result<()> {
+pub fn switch_workspace(name: &str, placement: Placement) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
     let path = switch_workspace_inner(&deps, name)?;
-    println!("{}", path.display());
+    if let Some(dir) = go_to_workspace(deps.rex.as_deref(), &deps.cwd, &path, placement)? {
+        println!("{}", dir.display());
+    }
     Ok(())
 }
 
@@ -559,7 +1075,11 @@ fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
 pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
 
     let (old, new) = match new_name {
         Some(new) => (name, new),
@@ -617,6 +1137,14 @@ fn rename_workspace_inner(
         );
     }
 
+    // Rex reports where processes are now, so look before the move.
+    let panes = deps
+        .rex
+        .as_deref()
+        .and_then(|r| r.panes().ok())
+        .unwrap_or_default();
+    let panes_in_old = rex::panes_inside(&panes, &old_path, None);
+
     eprintln!(
         "{} workspace '{}' -> '{}'...",
         "renaming".cyan(),
@@ -633,11 +1161,72 @@ fn rename_workspace_inner(
         new_name.bold()
     );
 
+    pool::rename_lease(&dwm_dir(&root), old_name, new_name)?;
+
+    if let Some(rex) = deps.rex.as_deref() {
+        follow_rename_in_rex(rex, &panes_in_old, old_name, new_name, &new_path);
+    }
+
     if is_inside(&deps.cwd, &old_path) {
         let relative = deps.cwd.strip_prefix(&old_path)?;
         Ok(Some(new_path.join(relative)))
     } else {
         Ok(None)
+    }
+}
+
+/// After a rename, relabel Rex sessions named after the old workspace and
+/// warn about other panes that were in it. Their processes follow the moved
+/// directory, but shells and agents keep the old path as text and will try to
+/// use it.
+fn follow_rename_in_rex(
+    rex: &dyn RexApi,
+    panes_in_old: &[&rex::Pane],
+    old_name: &str,
+    new_name: &str,
+    new_path: &Path,
+) {
+    let mut relabelled: Vec<&str> = Vec::new();
+    for pane in panes_in_old {
+        if pane.session_label.as_deref() == Some(old_name)
+            && !relabelled.contains(&pane.session_id.as_str())
+        {
+            match rex.rename_session(&pane.session_id, new_name) {
+                Ok(()) => relabelled.push(&pane.session_id),
+                Err(e) => eprintln!(
+                    "{} could not rename Rex session '{}': {e:#}",
+                    "warning:".yellow(),
+                    old_name
+                ),
+            }
+        }
+    }
+    if !relabelled.is_empty() {
+        eprintln!(
+            "{} renamed Rex session '{}' to '{}'",
+            "✓".green(),
+            old_name,
+            new_name.bold()
+        );
+    }
+    let others: Vec<String> = panes_in_old
+        .iter()
+        .filter(|p| Some(p.block_id.as_str()) != rex.current_block())
+        .map(|p| {
+            let mut p = (*p).clone();
+            if relabelled.contains(&p.session_id.as_str()) {
+                p.session_label = Some(new_name.to_string());
+            }
+            p.describe()
+        })
+        .collect();
+    if !others.is_empty() {
+        eprintln!(
+            "{} still in the old directory: {}. Restart programs there or cd to {}",
+            "note:".yellow(),
+            others.join(", "),
+            new_path.display()
+        );
     }
 }
 
@@ -657,7 +1246,11 @@ pub fn list_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
 pub fn list_workspace_entries_and_dwm_dir() -> Result<(Vec<WorkspaceEntry>, PathBuf)> {
     let cwd = std::env::current_dir()?;
     let backend = vcs::detect(&cwd)?;
-    let deps = WorkspaceDeps { backend, cwd };
+    let deps = WorkspaceDeps {
+        backend,
+        cwd,
+        rex: crate::rex::connect(),
+    };
     let entries = list_workspace_entries_inner(&deps)?;
     let dwm = match entries.first() {
         Some(entry) => dwm_dir(&entry.main_repo_path),
@@ -685,10 +1278,21 @@ struct ComputedEntry {
 
 /// Testable core of [`list_workspace_entries`].
 fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEntry>> {
+    let panes = deps.rex.as_deref().and_then(|r| r.panes().ok());
+    list_entries_with_panes(deps, panes.as_deref())
+}
+
+/// Like [`list_workspace_entries_inner`], with the Rex panes already listed
+/// (`None` outside Rex), so listing many repos asks Rex only once.
+fn list_entries_with_panes(
+    deps: &WorkspaceDeps,
+    panes: Option<&[rex::Pane]>,
+) -> Result<Vec<WorkspaceEntry>> {
     let main_repo = resolve_repo_root(deps)?;
     let dwm = dwm_dir(&main_repo);
 
-    let mut agent_summaries = agent::read_agent_summaries(&dwm);
+    let rex_summaries = panes.map(agent::summaries_from_panes);
+    let mut agent_summaries = agent::read_agent_summaries_with(&dwm, rex_summaries.as_ref());
 
     let main_ws_name = deps.backend.main_workspace_name();
     let vcs_workspaces = deps.backend.workspace_list(&main_repo).unwrap_or_default();
@@ -795,6 +1399,11 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
     let mut entries = Vec::with_capacity(candidates.len());
     for (c, comp) in candidates.into_iter().zip(computed) {
         let agent_status = agent_summaries.remove(&c.name);
+        let lease = pool::read_lease(&dwm, &c.name)
+            .filter(|l| pool::lease_state(l, panes) == pool::LeaseState::Held);
+        let rex_pane = panes.and_then(|p| {
+            rex::pick_pane(&rex::panes_inside(p, &c.path, None)).map(rex::PaneRef::from)
+        });
         entries.push(WorkspaceEntry {
             name: c.name,
             path: c.path,
@@ -809,6 +1418,8 @@ fn list_workspace_entries_inner(deps: &WorkspaceDeps) -> Result<Vec<WorkspaceEnt
             main_repo_path: main_repo.clone(),
             vcs_type,
             agent_status,
+            rex_pane,
+            lease,
         });
     }
 
@@ -834,6 +1445,10 @@ pub struct WorkspaceEntry {
     pub main_repo_path: PathBuf,
     pub vcs_type: vcs::VcsType,
     pub agent_status: Option<agent::AgentSummary>,
+    /// A Rex pane open in the workspace, when dwm runs inside Rex.
+    pub rex_pane: Option<rex::PaneRef>,
+    /// The workspace's lease, if one still holds it.
+    pub lease: Option<pool::Lease>,
 }
 
 /// Determine whether a non-main workspace should be shown as stale.
@@ -864,6 +1479,7 @@ fn stale_by_mtime(last_modified: Option<SystemTime>) -> bool {
 pub fn list_all_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let repos = read_and_prune_registry()?;
     let mut all_entries = Vec::new();
+    let panes = rex::connect().and_then(|r| r.panes().ok());
 
     for repo_root in repos {
         let backend = match vcs::detect(&repo_root) {
@@ -878,9 +1494,10 @@ pub fn list_all_workspace_entries() -> Result<Vec<WorkspaceEntry>> {
         let deps = WorkspaceDeps {
             backend,
             cwd: repo_root.clone(),
+            rex: None,
         };
 
-        match list_workspace_entries_inner(&deps) {
+        match list_entries_with_panes(&deps, panes.as_deref()) {
             Ok(entries) => {
                 for mut entry in entries {
                     entry.repo_name = Some(repo_label.clone());
@@ -924,6 +1541,42 @@ pub fn format_time_ago(time: Option<SystemTime>) -> String {
     }
     let months = days / 30;
     format!("{}mo ago", months)
+}
+
+/// Workspaces as JSON for scripts and Rex's command palette. Unlike the
+/// table, this goes to stdout.
+pub fn print_status_json(entries: &[WorkspaceEntry]) -> Result<()> {
+    println!("{}", serde_json::to_string(&status_json(entries))?);
+    Ok(())
+}
+
+fn status_json(entries: &[WorkspaceEntry]) -> serde_json::Value {
+    let workspaces: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "path": e.path,
+                "repo": e.repo_name,
+                "main_repo_path": e.main_repo_path,
+                "is_main": e.is_main,
+                "change_id": e.change_id,
+                "description": e.description,
+                "bookmarks": e.bookmarks,
+                "stale": e.is_stale,
+                "modified": e
+                    .last_modified
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()),
+                "diff": e.diff_stat,
+                "agents": e.agent_status.as_ref().filter(|s| !s.is_empty()),
+                "rex_pane": e.rex_pane,
+                "session_label": session_label_for(&e.path),
+                "lease": e.lease,
+            })
+        })
+        .collect();
+    serde_json::json!({ "workspaces": workspaces })
 }
 
 /// Print a non-interactive tabular workspace summary to stderr.
@@ -1097,6 +1750,7 @@ fn print_status_to<W: Write>(entries: &[WorkspaceEntry], mut out: W) -> Result<(
                         match summary.most_urgent() {
                             Some(crate::agent::AgentStatus::Waiting) => text.yellow().to_string(),
                             Some(crate::agent::AgentStatus::Working) => text.green().to_string(),
+                            Some(crate::agent::AgentStatus::Done) => text.cyan().to_string(),
                             _ => text.dimmed().to_string(),
                         }
                     }
@@ -1307,7 +1961,7 @@ mod tests {
 
     // ── registry tests ────────────────────────────────────────────────
 
-    fn with_data_dir<F: FnOnce()>(dir: &Path, f: F) {
+    fn with_data_dir<R, F: FnOnce() -> R>(dir: &Path, f: F) -> R {
         // Override XDG_DATA_HOME / Application Support so `dirs::data_dir()`
         // returns `dir`.
         #[cfg(target_os = "macos")]
@@ -1326,7 +1980,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         std::fs::create_dir_all(value.join("Library/Application Support")).unwrap();
 
-        temp_env::with_var(var, Some(value.as_os_str()), f);
+        temp_env::with_var(var, Some(value.as_os_str()), f)
     }
 
     #[test]
@@ -1436,6 +2090,10 @@ mod tests {
         Rename {
             old_name: String,
             new_name: String,
+        },
+        Reset {
+            name: String,
+            revision: String,
         },
     }
 
@@ -1567,6 +2225,20 @@ mod tests {
             "default"
         }
 
+        fn reset_workspace(
+            &self,
+            _repo_dir: &Path,
+            _worktree_dir: &Path,
+            ws_name: &str,
+            revision: &str,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push(MockCall::Reset {
+                name: ws_name.to_string(),
+                revision: revision.to_string(),
+            });
+            Ok(())
+        }
+
         fn prune_verdict(
             &self,
             _repo_dir: &Path,
@@ -1621,6 +2293,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -1673,6 +2346,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir,
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -1703,6 +2377,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -1722,6 +2397,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -1740,10 +2416,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("my-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
         });
 
         let calls = calls.lock().unwrap();
@@ -1773,10 +2458,11 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, None, None, None).unwrap();
+            new_workspace_inner(&deps, None, None, None, Placement::Rex, &[]).unwrap();
         });
 
         let calls = calls.lock().unwrap();
@@ -1804,12 +2490,28 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap();
-            let err =
-                new_workspace_inner(&deps, Some("dup-ws".to_string()), None, None).unwrap_err();
+            new_workspace_inner(
+                &deps,
+                Some("dup-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
+            let err = new_workspace_inner(
+                &deps,
+                Some("dup-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap_err();
             assert!(err.to_string().contains("already exists"), "error: {}", err);
         });
     }
@@ -1826,10 +2528,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some(".hidden".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some(".hidden".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
         });
         assert!(worktrees_dir(&main_repo).join(".hidden").exists());
     }
@@ -1843,13 +2554,21 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
             for bad in [".", "..", "foo/bar", "with\\backslash", ""] {
-                let err = new_workspace_inner(&deps, Some(bad.to_string()), None, None)
-                    .unwrap_err()
-                    .to_string();
+                let err = new_workspace_inner(
+                    &deps,
+                    Some(bad.to_string()),
+                    None,
+                    None,
+                    Placement::Rex,
+                    &[],
+                )
+                .unwrap_err()
+                .to_string();
                 assert!(
                     err.contains("invalid workspace name"),
                     "expected rejection for {:?}, got: {}",
@@ -1878,11 +2597,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some("forked".to_string()), None, Some("source-ws"))
-                .unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("forked".to_string()),
+                None,
+                Some("source-ws"),
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
         });
 
         let calls = calls.lock().unwrap();
@@ -1908,12 +2635,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            let err =
-                new_workspace_inner(&deps, Some("forked".to_string()), None, Some("no-such-ws"))
-                    .unwrap_err();
+            let err = new_workspace_inner(
+                &deps,
+                Some("forked".to_string()),
+                None,
+                Some("no-such-ws"),
+                Placement::Rex,
+                &[],
+            )
+            .unwrap_err();
             assert!(
                 err.to_string().contains("not found"),
                 "error should mention not found: {}",
@@ -1933,10 +2667,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some("ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
         });
         assert!(tmp.path().join("myrepo.dwm/worktrees/ws").is_dir());
         assert!(!main_repo.join(".gitignore").exists());
@@ -1952,10 +2695,19 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         with_data_dir(tmp.path(), || {
-            new_workspace_inner(&deps, Some("ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let entries = read_and_prune_registry().unwrap();
             assert!(entries.contains(&fs::canonicalize(&main_repo).unwrap()));
         });
@@ -1986,6 +2738,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
         let outcome = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
         assert_eq!(
@@ -2009,6 +2762,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
         let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
         assert_eq!(outcome.deleted, vec!["a".to_string()]);
@@ -2030,6 +2784,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
         let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
         assert!(outcome.verdicts.is_empty());
@@ -2044,6 +2799,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: worktrees_dir(&main_repo).join("a"),
+            rex: None,
         };
         let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
         assert_eq!(outcome.redirect, Some(main_repo));
@@ -2057,6 +2813,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
         let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
         assert!(outcome.verdicts.is_empty());
@@ -2077,11 +2834,16 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
-        let redirect =
-            delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose)
-                .unwrap();
+        let redirect = delete_workspace_inner(
+            &deps,
+            Some("my-ws".to_string()),
+            DeleteOutput::Verbose,
+            OpenPanes::Refuse,
+        )
+        .unwrap();
         assert!(
             redirect.is_none(),
             "should not redirect when cwd is outside workspace"
@@ -2115,11 +2877,16 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.join("src"),
+            rex: None,
         };
 
-        let redirect =
-            delete_workspace_inner(&deps, Some("my-ws".to_string()), DeleteOutput::Verbose)
-                .unwrap();
+        let redirect = delete_workspace_inner(
+            &deps,
+            Some("my-ws".to_string()),
+            DeleteOutput::Verbose,
+            OpenPanes::Refuse,
+        )
+        .unwrap();
         let redirect = redirect.expect("should redirect when cwd is inside workspace");
         assert_eq!(redirect, main_repo);
     }
@@ -2135,9 +2902,11 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.clone(),
+            rex: None,
         };
 
-        let _redirected = delete_workspace_inner(&deps, None, DeleteOutput::Verbose).unwrap();
+        let _redirected =
+            delete_workspace_inner(&deps, None, DeleteOutput::Verbose, OpenPanes::Refuse).unwrap();
 
         let calls = calls.lock().unwrap();
         match &calls[0] {
@@ -2157,12 +2926,14 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = delete_workspace_inner(
             &deps,
             Some("nonexistent".to_string()),
             DeleteOutput::Verbose,
+            OpenPanes::Refuse,
         )
         .unwrap_err();
         assert!(err.to_string().contains("not found"), "error: {}", err);
@@ -2181,6 +2952,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let redirect = rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
@@ -2216,6 +2988,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.join("src"),
+            rex: None,
         };
 
         let redirect = rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
@@ -2236,6 +3009,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         rename_workspace_inner(&deps, "old-name", "new-name").unwrap();
@@ -2261,6 +3035,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = rename_workspace_inner(&deps, "nonexistent", "new-name").unwrap_err();
@@ -2278,6 +3053,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = rename_workspace_inner(&deps, "old-name", "new-name").unwrap_err();
@@ -2293,6 +3069,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = rename_workspace_inner(&deps, "default", "new-name").unwrap_err();
@@ -2309,6 +3086,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = rename_workspace_inner(&deps, "old-name", "..").unwrap_err();
@@ -2329,6 +3107,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         rename_workspace_inner(&deps, "old-name", ".hidden").unwrap();
@@ -2348,6 +3127,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let path = switch_workspace_inner(&deps, "feat-x").unwrap();
@@ -2363,6 +3143,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let path = switch_workspace_inner(&deps, "default").unwrap();
@@ -2378,6 +3159,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = switch_workspace_inner(&deps, "nonexistent").unwrap_err();
@@ -2397,6 +3179,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: ws_dir.clone(),
+            rex: None,
         };
 
         let old = infer_workspace_name_from_cwd(&deps).unwrap();
@@ -2426,6 +3209,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(mock),
             cwd: main_repo,
+            rex: None,
         };
 
         let err = infer_workspace_name_from_cwd(&deps).unwrap_err();
@@ -2545,6 +3329,8 @@ mod tests {
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
+                rex_pane: None,
+                lease: None,
             },
             WorkspaceEntry {
                 name: "feat-x".to_string(),
@@ -2560,6 +3346,8 @@ mod tests {
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
+                rex_pane: None,
+                lease: None,
             },
         ];
         // Should not panic; output goes to stderr
@@ -2592,6 +3380,8 @@ mod tests {
                 main_repo_path: PathBuf::from("/tmp/repo"),
                 vcs_type: vcs::VcsType::Jj,
                 agent_status: None,
+                rex_pane: None,
+                lease: None,
             },
             WorkspaceEntry {
                 name: "hazy-quail".to_string(),
@@ -2613,8 +3403,12 @@ mod tests {
                 agent_status: Some(crate::agent::AgentSummary {
                     waiting: 1,
                     working: 0,
+                    done: 0,
                     idle: 0,
+                    notes: Vec::new(),
                 }),
+                rex_pane: None,
+                lease: None,
             },
         ];
 
@@ -2677,6 +3471,7 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: vcs.to_backend(),
                 cwd: root.clone(),
+                rex: None,
             };
             new_workspace_inner(
                 &deps,
@@ -2687,12 +3482,22 @@ mod tests {
                     None
                 },
                 None,
+                Placement::Rex,
+                &[],
             )
             .unwrap();
             let one = worktrees_dir(&root).join("one");
             assert_eq!(fs::read_to_string(one.join("marker")).unwrap(), "main");
             fs::write(one.join("cache/value"), "source").unwrap();
-            new_workspace_inner(&deps, Some("two".into()), None, Some("one")).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("two".into()),
+                None,
+                Some("one"),
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             assert_eq!(
                 fs::read_to_string(worktrees_dir(&root).join("two/marker")).unwrap(),
                 "source"
@@ -2708,12 +3513,30 @@ mod tests {
                 "[workspace]\ncopy = ['../escape']\n",
             )
             .unwrap();
-            assert!(new_workspace_inner(&deps, Some("invalid".into()), None, None).is_err());
+            assert!(
+                new_workspace_inner(
+                    &deps,
+                    Some("invalid".into()),
+                    None,
+                    None,
+                    Placement::Rex,
+                    &[]
+                )
+                .is_err()
+            );
             assert!(!worktrees_dir(&root).join("invalid").exists());
             if vcs == vcs::VcsType::Jj {
                 fs::write(root.join(".dwm.toml"), "[workspace]\ncheckout = 'cow'\n").unwrap();
                 assert!(
-                    new_workspace_inner(&deps, Some("unsupported".into()), None, None).is_err()
+                    new_workspace_inner(
+                        &deps,
+                        Some("unsupported".into()),
+                        None,
+                        None,
+                        Placement::Rex,
+                        &[]
+                    )
+                    .is_err()
                 );
                 assert!(!worktrees_dir(&root).join("unsupported").exists());
             }
@@ -2761,6 +3584,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -2799,6 +3623,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -2831,15 +3656,25 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
 
-            new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("test-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("test-ws");
             assert!(ws_dir.exists(), "workspace dir should exist after creation");
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             assert!(entries.iter().any(|e| e.name == "test-ws"));
@@ -2847,14 +3682,21 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose)
-                .unwrap();
+            delete_workspace_inner(
+                &deps3,
+                Some("test-ws".to_string()),
+                DeleteOutput::Verbose,
+                OpenPanes::Refuse,
+            )
+            .unwrap();
             assert!(!ws_dir.exists());
 
             let deps4 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps4).unwrap();
             assert!(!entries.iter().any(|e| e.name == "test-ws"));
@@ -2874,9 +3716,18 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
 
-            new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("feature".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("feature");
 
             fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
@@ -2893,6 +3744,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             let feat = entries.iter().find(|e| e.name == "feature").unwrap();
@@ -2917,15 +3769,25 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(backend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
 
-            new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("old-name".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let old_path = worktrees_dir(&main_repo).join("old-name");
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
 
@@ -2935,6 +3797,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps3).unwrap();
             assert!(entries.iter().any(|e| e.name == "new-name"));
@@ -2954,9 +3817,18 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
 
-            new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("my-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_path = worktrees_dir(&main_repo).join("my-ws");
             let subdir = ws_path.join("src");
             fs::create_dir_all(&subdir).unwrap();
@@ -2964,6 +3836,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: subdir,
+                rex: None,
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
             let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
@@ -3017,6 +3890,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -3053,6 +3927,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(backend),
             cwd: main_repo.clone(),
+            rex: None,
         };
 
         let entries = list_workspace_entries_inner(&deps).unwrap();
@@ -3083,14 +3958,24 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("test-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("test-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("test-ws");
             assert!(ws_dir.exists());
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             assert!(entries.iter().any(|e| e.name == "test-ws"));
@@ -3098,14 +3983,21 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            delete_workspace_inner(&deps3, Some("test-ws".to_string()), DeleteOutput::Verbose)
-                .unwrap();
+            delete_workspace_inner(
+                &deps3,
+                Some("test-ws".to_string()),
+                DeleteOutput::Verbose,
+                OpenPanes::Refuse,
+            )
+            .unwrap();
             assert!(!ws_dir.exists());
 
             let deps4 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps4).unwrap();
             assert!(!entries.iter().any(|e| e.name == "test-ws"));
@@ -3124,14 +4016,24 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("my cool feature".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("my cool feature".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("my cool feature");
             assert!(ws_dir.exists());
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             assert!(entries.iter().any(|e| e.name == "my cool feature"));
@@ -3139,6 +4041,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let switch_path = switch_workspace_inner(&deps3, "my cool feature").unwrap();
             assert_eq!(switch_path, ws_dir);
@@ -3146,11 +4049,13 @@ mod tests {
             let deps4 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             delete_workspace_inner(
                 &deps4,
                 Some("my cool feature".to_string()),
                 DeleteOutput::Verbose,
+                OpenPanes::Refuse,
             )
             .unwrap();
             assert!(!ws_dir.exists());
@@ -3169,8 +4074,17 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("feature".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("feature");
 
             fs::write(ws_dir.join("hello.txt"), "hello world\n").unwrap();
@@ -3183,6 +4097,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             let feat = entries.iter().find(|e| e.name == "feature").unwrap();
@@ -3235,8 +4150,17 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("feature".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("feature".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("feature");
             let ws_str = ws_dir.to_str().unwrap().to_string();
 
@@ -3253,6 +4177,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps2).unwrap();
             let feat = entries.iter().find(|e| e.name == "feature").unwrap();
@@ -3281,14 +4206,24 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("old-name".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("old-name".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let old_path = worktrees_dir(&main_repo).join("old-name");
             assert!(old_path.exists());
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             rename_workspace_inner(&deps2, "old-name", "new-name").unwrap();
 
@@ -3315,6 +4250,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps3).unwrap();
             assert!(entries.iter().any(|e| e.name == "new-name"));
@@ -3334,8 +4270,17 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("my-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
 
             let main_str = main_repo.to_str().unwrap();
             fs::write(main_repo.join("file.txt"), "content\n").unwrap();
@@ -3347,6 +4292,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
 
@@ -3356,6 +4302,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo,
+                rex: None,
             };
             let entries = list_workspace_entries_inner(&deps3).unwrap();
             assert!(entries.iter().any(|e| e.name == "renamed-ws"));
@@ -3375,13 +4322,23 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("switch-target".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("switch-target");
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
             assert_eq!(path, ws_dir);
@@ -3389,6 +4346,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::git::GitBackend::default()),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let path = switch_workspace_inner(&deps3, "main-worktree").unwrap();
             assert_eq!(path, main_repo);
@@ -3407,13 +4365,23 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("switch-target".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("switch-target".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_dir = worktrees_dir(&main_repo).join("switch-target");
 
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let path = switch_workspace_inner(&deps2, "switch-target").unwrap();
             assert_eq!(path, ws_dir);
@@ -3421,6 +4389,7 @@ mod tests {
             let deps3 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
             let path = switch_workspace_inner(&deps3, "default").unwrap();
             assert_eq!(path, main_repo);
@@ -3439,8 +4408,17 @@ mod tests {
             let deps = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: main_repo.clone(),
+                rex: None,
             };
-            new_workspace_inner(&deps, Some("my-ws".to_string()), None, None).unwrap();
+            new_workspace_inner(
+                &deps,
+                Some("my-ws".to_string()),
+                None,
+                None,
+                Placement::Rex,
+                &[],
+            )
+            .unwrap();
             let ws_path = worktrees_dir(&main_repo).join("my-ws");
             let subdir = ws_path.join("src");
             fs::create_dir_all(&subdir).unwrap();
@@ -3448,6 +4426,7 @@ mod tests {
             let deps2 = WorkspaceDeps {
                 backend: Box::new(crate::jj::JjBackend),
                 cwd: subdir,
+                rex: None,
             };
             let redirect = rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
             let redirect = redirect.expect("should redirect when cwd is inside renamed workspace");
@@ -3584,6 +4563,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(crate::jj::JjBackend),
             cwd: repo.clone(),
+            rex: None,
         };
         let dry = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
         assert_eq!(verdict_of(&dry, "clean"), &vcs::PruneVerdict::Prunable);
@@ -3687,6 +4667,7 @@ mod tests {
         let deps = WorkspaceDeps {
             backend: Box::new(crate::git::GitBackend::default()),
             cwd: repo.clone(),
+            rex: None,
         };
         let dry = prune_workspaces_inner(&deps, PruneMode::DryRun).unwrap();
         assert_eq!(verdict_of(&dry, "clean"), &vcs::PruneVerdict::Prunable);
@@ -3706,5 +4687,732 @@ mod tests {
         }
         let listed = run_ok(&repo, "git", &["worktree", "list", "--porcelain"]);
         assert!(!listed.contains("/clean\n"), "{listed}");
+    }
+
+    #[test]
+    fn e2e_git_lease_reuses_and_resets_members() {
+        assert!(git_available(), "git must be installed to run this test");
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("remote.git");
+        run_ok(
+            tmp.path(),
+            "git",
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        let repo_path = tmp.path().join("repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        run_ok(&repo_path, "git", &["init", "-q", "-b", "main"]);
+        let repo = repo_path.canonicalize().unwrap();
+        run_ok(
+            &repo,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        );
+        run_ok(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_ok(&repo, "git", &["push", "-q", "-u", "origin", "main"]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(crate::git::GitBackend::default()),
+            cwd: repo.clone(),
+            rex: None,
+        };
+        let lease = || {
+            with_data_dir(tmp.path(), || {
+                lease_workspace_inner(&deps, "agents", None).unwrap()
+            })
+        };
+
+        let first = lease();
+        assert_eq!(first, worktrees_dir(&repo).join("agents-1"));
+        // Work that reached the remote is safe to discard on reuse, even on a
+        // branch of the agent's own.
+        run_ok(&first, "git", &["checkout", "-q", "-b", "fix-123"]);
+        run_ok(
+            &first,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "pushed work"],
+        );
+        run_ok(&first, "git", &["push", "-q", "-u", "origin", "fix-123"]);
+        let fix_before = run_ok(&repo, "git", &["rev-parse", "fix-123"]);
+        run_ok(
+            &repo,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "trunk moves"],
+        );
+        release_workspace_inner(&deps, Some("agents-1".into())).unwrap();
+
+        assert_eq!(lease(), first, "the released member is reused");
+        let head = run_ok(&first, "git", &["log", "-1", "--format=%s"]);
+        assert_eq!(head.trim(), "trunk moves", "reset to the current trunk");
+        let branch = run_ok(&first, "git", &["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "agents-1", "back on its own branch");
+        // Regression: the reset used to move whatever branch was checked out.
+        let fix_after = run_ok(&repo, "git", &["rev-parse", "fix-123"]);
+        assert_eq!(fix_before, fix_after, "the agent's branch is untouched");
+
+        // An uncommitted change makes a released member unusable.
+        fs::write(first.join("wip.txt"), "wip").unwrap();
+        release_workspace_inner(&deps, Some("agents-1".into())).unwrap();
+        assert_eq!(lease(), worktrees_dir(&repo).join("agents-2"));
+        assert!(
+            first.join("wip.txt").exists(),
+            "the dirty member was left alone"
+        );
+    }
+
+    // ── Rex integration ──────────────────────────────────────────────
+
+    mod rex_integration {
+        use super::*;
+        use crate::rex::ProgramState::{Blocked, Idle, Working};
+        use crate::rex::tests::{FakeRex, pane};
+
+        /// A repo with workspaces `a` and `b`, and the deps to act on it from
+        /// the main checkout with `fake` as the Rex server.
+        fn fixture(
+            tmp: &Path,
+            fake: &FakeRex,
+        ) -> (PathBuf, WorkspaceDeps, Arc<Mutex<Vec<MockCall>>>) {
+            let main_repo = make_repo_with_vcs(tmp);
+            for ws in ["a", "b"] {
+                fs::create_dir_all(worktrees_dir(&main_repo).join(ws)).unwrap();
+            }
+            let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+            let mock = mock.with_prune_verdicts(&[
+                ("a", vcs::PruneVerdict::Prunable),
+                ("b", vcs::PruneVerdict::Prunable),
+            ]);
+            let deps = WorkspaceDeps {
+                backend: Box::new(mock),
+                cwd: main_repo.clone(),
+                rex: fake.boxed(),
+            };
+            (main_repo, deps, calls)
+        }
+
+        fn ws(main_repo: &Path, name: &str) -> PathBuf {
+            worktrees_dir(main_repo).join(name)
+        }
+
+        // switching
+
+        #[test]
+        fn switch_focuses_a_pane_already_in_the_workspace() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(a.join("src")).unwrap();
+            let fake = FakeRex::new(
+                vec![
+                    pane("shell", "a", &a.join("src"), &[]),
+                    pane("agent", "a", &a, &[Idle]),
+                ],
+                true,
+            )
+            .in_block("me");
+
+            let cd = go_to_workspace(Some(&fake), &main_repo, &a, Placement::Rex).unwrap();
+            assert_eq!(cd, None, "focusing a pane leaves the shell where it is");
+            assert_eq!(fake.calls(), vec!["panes", "focus agent"]);
+        }
+
+        #[test]
+        fn switch_falls_back_to_cd_when_rex_wont_show_the_session() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("p", "a", &a, &[])], false).in_block("me");
+
+            let cd = go_to_workspace(Some(&fake), &main_repo, &a, Placement::Rex).unwrap();
+            assert_eq!(cd, Some(a));
+            assert_eq!(fake.calls(), vec!["panes", "focus p"]);
+        }
+
+        #[test]
+        fn switch_opens_a_session_named_after_the_workspace() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            // A pane in the main checkout doesn't count for workspace `a`.
+            let fake = FakeRex::new(vec![pane("p", "repo", &main_repo, &[])], true).in_block("me");
+
+            let cd = go_to_workspace(Some(&fake), &main_repo, &a, Placement::Rex).unwrap();
+            assert_eq!(cd, None);
+            let opened = fake.opened.borrow();
+            assert_eq!(opened.len(), 1);
+            assert_eq!(opened[0].label, "a");
+            assert_eq!(opened[0].cwd, a);
+            assert_eq!(opened[0].create, crate::rex::CreateWhen::OnlyIfShown);
+            assert_eq!(opened[0].initial_input, None);
+        }
+
+        #[test]
+        fn switch_to_main_labels_the_session_after_the_repo() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![], true).in_block("me");
+
+            go_to_workspace(Some(&fake), &a, &main_repo, Placement::Rex).unwrap();
+            assert_eq!(fake.opened.borrow()[0].label, "myrepo");
+        }
+
+        #[test]
+        fn switch_changes_directory_when_this_pane_is_already_there() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(a.join("src")).unwrap();
+            let fake = FakeRex::new(vec![pane("other", "a", &a, &[])], true).in_block("me");
+
+            let cd = go_to_workspace(Some(&fake), &a.join("src"), &a, Placement::Rex).unwrap();
+            assert_eq!(cd, Some(a));
+            assert!(fake.calls().is_empty(), "no need to ask Rex anything");
+        }
+
+        #[test]
+        fn switch_from_a_throwaway_pane_uses_rex_even_when_already_there() {
+            // The palette's floating picker runs in the repo it lists, and
+            // closes when dwm exits, so a cd there would do nothing visible.
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let mut fake =
+                FakeRex::new(vec![pane("me", "float", &main_repo, &[])], true).in_block("me");
+            fake.pane = crate::rex::CurrentPane::Throwaway;
+
+            let cd = go_to_workspace(Some(&fake), &main_repo, &main_repo, Placement::Rex).unwrap();
+            assert_eq!(cd, None);
+            // The picker's own pane is never the one focused.
+            assert_eq!(fake.calls(), vec!["panes", "open myrepo"]);
+        }
+
+        #[test]
+        fn switch_here_and_outside_rex_change_directory() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("p", "a", &a, &[])], true);
+
+            let cd = go_to_workspace(Some(&fake), &main_repo, &a, Placement::Here).unwrap();
+            assert_eq!(cd, Some(a.clone()));
+            assert!(fake.calls().is_empty());
+            let cd = go_to_workspace(None, &main_repo, &a, Placement::Rex).unwrap();
+            assert_eq!(cd, Some(a));
+        }
+
+        #[test]
+        fn unattended_dwm_never_moves_rex() {
+            // Regression guard: an agent running `dwm switch` inside a Rex pane
+            // has REX_SERVER set, but must not switch the person's view.
+            assert_eq!(
+                effective_placement(Placement::Rex, Terminal::Unattended),
+                Placement::Here
+            );
+            assert_eq!(
+                effective_placement(Placement::Rex, Terminal::Interactive),
+                Placement::Rex
+            );
+            assert_eq!(
+                effective_placement(Placement::Here, Terminal::Interactive),
+                Placement::Here
+            );
+        }
+
+        // creating
+
+        #[test]
+        fn new_opens_a_session_instead_of_changing_directory() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fake = FakeRex::new(vec![], true).in_block("me");
+            let (main_repo, deps, _calls) = fixture(tmp.path(), &fake);
+
+            let created = with_data_dir(tmp.path(), || {
+                new_workspace_inner(&deps, Some("c".into()), None, None, Placement::Rex, &[])
+                    .unwrap()
+            });
+            assert_eq!(created.name, "c");
+            assert_eq!(created.cd, None);
+            let opened = fake.opened.borrow();
+            assert_eq!(opened[0].label, "c");
+            assert_eq!(opened[0].cwd, ws(&main_repo, "c"));
+        }
+
+        #[test]
+        fn new_with_command_types_it_into_the_session_even_when_unseen() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fake = FakeRex::new(vec![], false).in_block("me");
+            let (main_repo, deps, _calls) = fixture(tmp.path(), &fake);
+            let command = vec!["claude".to_string(), "fix it".to_string()];
+
+            let created = with_data_dir(tmp.path(), || {
+                new_workspace_inner(
+                    &deps,
+                    Some("c".into()),
+                    None,
+                    None,
+                    Placement::Rex,
+                    &command,
+                )
+                .unwrap()
+            });
+            let opened = fake.opened.borrow();
+            assert_eq!(
+                opened[0].initial_input.as_deref(),
+                Some("claude 'fix it'\r")
+            );
+            assert_eq!(opened[0].create, crate::rex::CreateWhen::Always);
+            // The session runs unseen, so the shell still goes to the workspace.
+            assert_eq!(created.cd, Some(ws(&main_repo, "c")));
+        }
+
+        #[test]
+        fn new_with_command_outside_rex_fails_before_creating_anything() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+            let deps = WorkspaceDeps {
+                backend: Box::new(mock),
+                cwd: main_repo.clone(),
+                rex: None,
+            };
+            let err = new_workspace_inner(
+                &deps,
+                Some("c".into()),
+                None,
+                None,
+                Placement::Rex,
+                &["claude".to_string()],
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("needs a Rex session"), "{err}");
+            assert!(calls.lock().unwrap().is_empty());
+            assert!(!ws(&main_repo, "c").exists());
+        }
+
+        // deleting
+
+        #[test]
+        fn delete_refuses_while_a_pane_is_open_in_the_workspace() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("agent", "a-session", &a, &[Working])], true);
+            let (_, deps, calls) = fixture(tmp.path(), &fake);
+
+            let err = delete_workspace_inner(
+                &deps,
+                Some("a".into()),
+                DeleteOutput::Quiet,
+                OpenPanes::Refuse,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("open in Rex"), "{err}");
+            assert!(err.to_string().contains("a-session"), "{err}");
+            assert!(calls.lock().unwrap().is_empty(), "nothing removed");
+            assert!(a.exists());
+        }
+
+        #[test]
+        fn delete_can_close_the_panes_first() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("agent", "a", &a, &[Working])], true);
+            let (_, deps, calls) = fixture(tmp.path(), &fake);
+
+            delete_workspace_inner(
+                &deps,
+                Some("a".into()),
+                DeleteOutput::Quiet,
+                OpenPanes::Close,
+            )
+            .unwrap();
+            assert_eq!(fake.calls(), vec!["panes", "close agent"]);
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            assert!(!a.exists());
+        }
+
+        #[test]
+        fn delete_ignores_the_pane_dwm_runs_in() {
+            // That pane is sent back to the repo root by the shell wrapper.
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("me", "a", &a, &[])], true).in_block("me");
+            let (_, mut deps, _) = fixture(tmp.path(), &fake);
+            deps.cwd = a.clone();
+
+            let redirect =
+                delete_workspace_inner(&deps, None, DeleteOutput::Quiet, OpenPanes::Refuse)
+                    .unwrap();
+            assert_eq!(redirect, Some(main_repo));
+        }
+
+        // pruning
+
+        #[test]
+        fn prune_keeps_workspaces_open_in_rex() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(
+                vec![pane("p1", "a", &a, &[Blocked]), pane("p2", "a", &a, &[])],
+                true,
+            );
+            let (_, deps, calls) = fixture(tmp.path(), &fake);
+
+            let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+            assert_eq!(outcome.deleted, vec!["b"]);
+            let (_, verdict) = &outcome.verdicts[0];
+            match verdict {
+                vcs::PruneVerdict::Keep(reason) => {
+                    assert_eq!(reason, "open in Rex session 'a' (zsh) and 1 more")
+                }
+                other => panic!("expected Keep, got {other:?}"),
+            }
+            // Only `b` reached the backend's delete.
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            // One look decides every verdict; deleting `b` looks again just before
+            // removing it.
+            assert_eq!(fake.calls(), vec!["panes", "panes"]);
+        }
+
+        // renaming
+
+        #[test]
+        fn rename_relabels_the_workspace_session() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let mut renamed_session = pane("p1", "a", &a, &[]);
+            renamed_session.session_id = "session:a".into();
+            let mut second_pane = pane("p2", "a", &a, &[]);
+            second_pane.session_id = "session:a".into();
+            let other_session = pane("p3", "something-else", &a, &[]);
+            let fake = FakeRex::new(vec![renamed_session, second_pane, other_session], true);
+            let (_, deps, _) = fixture(tmp.path(), &fake);
+
+            rename_workspace_inner(&deps, "a", "c").unwrap();
+            assert_eq!(fake.calls(), vec!["panes", "rename session:a c"]);
+        }
+
+        // listing
+
+        #[test]
+        fn list_reports_rex_panes_and_their_agent_status() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(
+                vec![
+                    pane("p1", "a", &a, &[Blocked]),
+                    pane("p2", "a", &a, &[Working]),
+                    pane("p3", "repo", &main_repo, &[]),
+                ],
+                true,
+            );
+            let (_, deps, _) = fixture(tmp.path(), &fake);
+
+            let entries = list_workspace_entries_inner(&deps).unwrap();
+            let a_entry = entries.iter().find(|e| e.name == "a").unwrap();
+            let agents = a_entry.agent_status.as_ref().unwrap();
+            assert_eq!((agents.waiting, agents.working), (1, 1));
+            assert_eq!(a_entry.rex_pane.as_ref().unwrap().block_id, "p1");
+            let main = entries.iter().find(|e| e.is_main).unwrap();
+            assert_eq!(main.rex_pane.as_ref().unwrap().block_id, "p3");
+            assert_eq!(main.agent_status, None, "a plain shell is not an agent");
+            let b_entry = entries.iter().find(|e| e.name == "b").unwrap();
+            assert!(b_entry.rex_pane.is_none());
+        }
+
+        #[test]
+        fn status_json_includes_rex_fields() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let a = ws(&main_repo, "a");
+            fs::create_dir_all(&a).unwrap();
+            let fake = FakeRex::new(vec![pane("p1", "a", &a, &[Working])], true);
+            let (_, deps, _) = fixture(tmp.path(), &fake);
+
+            let entries = list_workspace_entries_inner(&deps).unwrap();
+            let json = status_json(&entries);
+            let list = json["workspaces"].as_array().unwrap();
+            let a_json = list.iter().find(|w| w["name"] == "a").unwrap();
+            assert_eq!(a_json["rex_pane"]["block_id"], "p1");
+            assert_eq!(a_json["agents"]["working"], 1);
+            assert_eq!(a_json["session_label"], "a");
+            assert_eq!(a_json["is_main"], false);
+            let main = list.iter().find(|w| w["is_main"] == true).unwrap();
+            assert_eq!(main["session_label"], "myrepo");
+            assert!(main["agents"].is_null());
+            assert!(main["rex_pane"].is_null());
+        }
+
+        // pools
+
+        /// A repo whose workspaces are `names`, each with the given verdict.
+        fn pool_fixture(
+            tmp: &Path,
+            fake: Option<&FakeRex>,
+            members: &[(&str, vcs::PruneVerdict)],
+        ) -> (PathBuf, WorkspaceDeps, Arc<Mutex<Vec<MockCall>>>) {
+            let main_repo = make_repo_with_vcs(tmp);
+            for (name, _) in members {
+                fs::create_dir_all(worktrees_dir(&main_repo).join(name)).unwrap();
+            }
+            let (mock, calls) = MockBackend::new(main_repo.clone(), vec![]);
+            let deps = WorkspaceDeps {
+                backend: Box::new(mock.with_prune_verdicts(members)),
+                cwd: main_repo.clone(),
+                rex: fake.and_then(|f| f.boxed()),
+            };
+            (main_repo, deps, calls)
+        }
+
+        fn lease(tmp: &Path, deps: &WorkspaceDeps, at: Option<&str>) -> PathBuf {
+            with_data_dir(tmp, || lease_workspace_inner(deps, "agents", at).unwrap())
+        }
+
+        #[test]
+        fn lease_creates_the_first_member_from_trunk() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fake = FakeRex::new(vec![], true).in_block("block:me");
+            let (main_repo, deps, calls) = pool_fixture(tmp.path(), Some(&fake), &[]);
+
+            let path = lease(tmp.path(), &deps, None);
+            assert_eq!(path, ws(&main_repo, "agents-1"));
+            match &calls.lock().unwrap()[..] {
+                [MockCall::Add { name, at, .. }] => {
+                    assert_eq!(name, "agents-1");
+                    assert_eq!(at.as_deref(), Some("trunk()"));
+                }
+                other => panic!("expected one Add, got {other:?}"),
+            }
+            let lease = pool::read_lease(&dwm_dir(&main_repo), "agents-1").unwrap();
+            assert_eq!(lease.rex_block.as_deref(), Some("block:me"));
+        }
+
+        #[test]
+        fn lease_reuses_a_free_member_and_resets_it() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, deps, calls) = pool_fixture(
+                tmp.path(),
+                None,
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable),
+                    ("agents-2", vcs::PruneVerdict::Prunable),
+                ],
+            );
+
+            let path = lease(tmp.path(), &deps, Some("main"));
+            assert_eq!(path, ws(&main_repo, "agents-1"));
+            match &calls.lock().unwrap()[..] {
+                [MockCall::Reset { name, revision }] => {
+                    assert_eq!((name.as_str(), revision.as_str()), ("agents-1", "main"))
+                }
+                other => panic!("expected one Reset, got {other:?}"),
+            }
+            assert!(pool::read_lease(&dwm_dir(&main_repo), "agents-1").is_some());
+
+            // The next lease skips the member now on loan.
+            let path = lease(tmp.path(), &deps, None);
+            assert_eq!(path, ws(&main_repo, "agents-2"));
+        }
+
+        #[test]
+        fn lease_skips_busy_members_and_creates_the_next() {
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let open = ws(&main_repo, "agents-2");
+            fs::create_dir_all(&open).unwrap();
+            let fake =
+                FakeRex::new(vec![pane("block:other", "x", &open, &[])], true).in_block("block:me");
+            let (main_repo, deps, calls) = pool_fixture(
+                tmp.path(),
+                Some(&fake),
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable), // leased below
+                    ("agents-2", vcs::PruneVerdict::Prunable), // open in Rex
+                    ("agents-3", keep("1 unpushed commit")),
+                    ("other-9", vcs::PruneVerdict::Prunable), // not in the pool
+                ],
+            );
+            pool::write_lease(
+                &dwm_dir(&main_repo),
+                &pool::Lease::new("agents-1", Some("block:other")),
+            )
+            .unwrap();
+
+            let path = lease(tmp.path(), &deps, None);
+            assert_eq!(path, ws(&main_repo, "agents-4"));
+            assert!(
+                matches!(&calls.lock().unwrap()[..], [MockCall::Add { name, .. }] if name == "agents-4"),
+                "nothing reset"
+            );
+        }
+
+        #[test]
+        fn lease_reclaims_a_member_whose_rex_pane_closed() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fake = FakeRex::new(vec![], true).in_block("block:me");
+            let (main_repo, deps, _) = pool_fixture(
+                tmp.path(),
+                Some(&fake),
+                &[("agents-1", vcs::PruneVerdict::Prunable)],
+            );
+            let dwm = dwm_dir(&main_repo);
+            pool::write_lease(&dwm, &pool::Lease::new("agents-1", Some("block:gone"))).unwrap();
+
+            assert_eq!(lease(tmp.path(), &deps, None), ws(&main_repo, "agents-1"));
+            let lease = pool::read_lease(&dwm, "agents-1").unwrap();
+            assert_eq!(
+                lease.rex_block.as_deref(),
+                Some("block:me"),
+                "re-leased to us"
+            );
+        }
+
+        #[test]
+        fn lease_rejects_bad_pool_names() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (_, deps, _) = pool_fixture(tmp.path(), None, &[]);
+            assert!(lease_workspace_inner(&deps, "a/b", None).is_err());
+            assert!(lease_workspace_inner(&deps, "..", None).is_err());
+        }
+
+        #[test]
+        fn release_ends_a_lease_by_name_or_from_cwd() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, mut deps, _) = pool_fixture(
+                tmp.path(),
+                None,
+                &[("agents-1", vcs::PruneVerdict::Prunable)],
+            );
+            let dwm = dwm_dir(&main_repo);
+            pool::write_lease(&dwm, &pool::Lease::new("agents-1", None)).unwrap();
+
+            deps.cwd = ws(&main_repo, "agents-1");
+            release_workspace_inner(&deps, None).unwrap();
+            assert!(pool::read_lease(&dwm, "agents-1").is_none());
+            // Releasing again is harmless.
+            release_workspace_inner(&deps, Some("agents-1".into())).unwrap();
+        }
+
+        #[test]
+        fn release_rejects_names_that_escape_the_leases_dir() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, deps, _) = pool_fixture(tmp.path(), None, &[]);
+            let victim = dwm_dir(&main_repo).join("victim.json");
+            fs::create_dir_all(dwm_dir(&main_repo)).unwrap();
+            fs::write(&victim, "{}").unwrap();
+            for bad in ["../victim", "a/b", ".."] {
+                assert!(
+                    release_workspace_inner(&deps, Some(bad.into())).is_err(),
+                    "{bad}"
+                );
+            }
+            assert!(victim.exists());
+        }
+
+        #[test]
+        fn prune_keeps_leased_workspaces() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, deps, _) = pool_fixture(
+                tmp.path(),
+                None,
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable),
+                    ("agents-2", vcs::PruneVerdict::Prunable),
+                ],
+            );
+            pool::write_lease(&dwm_dir(&main_repo), &pool::Lease::new("agents-1", None)).unwrap();
+
+            let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
+            assert_eq!(outcome.deleted, vec!["agents-2"]);
+            assert!(
+                matches!(&outcome.verdicts[0].1, vcs::PruneVerdict::Keep(r) if r.starts_with("leased")),
+                "{:?}",
+                outcome.verdicts
+            );
+        }
+
+        #[test]
+        fn status_json_omits_leases_whose_rex_pane_closed() {
+            // Regression: `status --json` reported a lease as held after its
+            // pane closed, while `lease` and `prune` already treated it as ended.
+            let tmp = tempfile::tempdir().unwrap();
+            let main_repo = make_repo_with_vcs(tmp.path());
+            let fake = FakeRex::new(vec![pane("block:alive", "x", &main_repo, &[])], true);
+            let (main_repo, deps, _) = pool_fixture(
+                tmp.path(),
+                Some(&fake),
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable),
+                    ("agents-2", vcs::PruneVerdict::Prunable),
+                    ("agents-3", vcs::PruneVerdict::Prunable),
+                ],
+            );
+            let dwm = dwm_dir(&main_repo);
+            pool::write_lease(&dwm, &pool::Lease::new("agents-1", Some("block:gone"))).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new("agents-2", Some("block:alive"))).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new("agents-3", None)).unwrap();
+
+            let entries = list_workspace_entries_inner(&deps).unwrap();
+            let json = status_json(&entries);
+            let lease_of = |name: &str| {
+                json["workspaces"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|w| w["name"] == name)
+                    .unwrap()["lease"]
+                    .clone()
+            };
+            assert!(lease_of("agents-1").is_null(), "its pane closed");
+            assert_eq!(lease_of("agents-2")["rex_block"], "block:alive");
+            assert_eq!(lease_of("agents-3")["workspace"], "agents-3");
+        }
+
+        #[test]
+        fn delete_and_rename_carry_the_lease() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (main_repo, deps, _) = pool_fixture(
+                tmp.path(),
+                None,
+                &[
+                    ("agents-1", vcs::PruneVerdict::Prunable),
+                    ("agents-2", vcs::PruneVerdict::Prunable),
+                ],
+            );
+            let dwm = dwm_dir(&main_repo);
+            pool::write_lease(&dwm, &pool::Lease::new("agents-1", None)).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new("agents-2", None)).unwrap();
+
+            rename_workspace_inner(&deps, "agents-1", "agents-7").unwrap();
+            assert!(pool::read_lease(&dwm, "agents-1").is_none());
+            assert!(pool::read_lease(&dwm, "agents-7").is_some());
+
+            delete_workspace_inner(
+                &deps,
+                Some("agents-2".into()),
+                DeleteOutput::Quiet,
+                OpenPanes::Refuse,
+            )
+            .unwrap();
+            assert!(pool::read_lease(&dwm, "agents-2").is_none());
+        }
     }
 }

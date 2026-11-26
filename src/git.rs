@@ -353,6 +353,28 @@ impl VcsBackend for GitBackend {
         .unwrap_or_default()
     }
 
+    fn trunk_revision(&self, repo_dir: &Path) -> String {
+        self.trunk(repo_dir).to_string()
+    }
+
+    fn reset_workspace(
+        &self,
+        repo_dir: &Path,
+        worktree_dir: &Path,
+        ws_name: &str,
+        revision: &str,
+    ) -> Result<()> {
+        let commit = self.resolve_revision(repo_dir, revision)?;
+        // Put the worktree back on the branch named after it. Resetting
+        // whatever branch it was left on would move an unrelated branch the
+        // last user switched to. If that name is checked out in another
+        // worktree, detach rather than fight over it.
+        if run_git_in(worktree_dir, &["checkout", "-B", ws_name, &commit]).is_err() {
+            run_git_in(worktree_dir, &["checkout", "--detach", &commit])?;
+        }
+        Ok(())
+    }
+
     fn prune_verdict(&self, _repo_dir: &Path, worktree_dir: &Path, _ws_name: &str) -> PruneVerdict {
         match run_git_in(
             worktree_dir,

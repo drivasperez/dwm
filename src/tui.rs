@@ -401,8 +401,72 @@ impl App {
     }
 }
 
-fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
-    let content = match preview {
+/// Split off the footer: an optional line for the selected workspace's agent
+/// message, then the help bar. Each is left out when the screen is too short.
+fn footer_layout(area: Rect, with_note: bool) -> (Rect, Option<Rect>, Option<Rect>) {
+    if with_note && area.height > 4 {
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        (chunks[0], Some(chunks[1]), Some(chunks[2]))
+    } else if area.height > 3 {
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+        (chunks[0], None, Some(chunks[1]))
+    } else {
+        (area, None, None)
+    }
+}
+
+/// The color an agent status is shown in.
+fn status_color(status: crate::agent::AgentStatus) -> Color {
+    match status {
+        crate::agent::AgentStatus::Waiting => Color::Yellow,
+        crate::agent::AgentStatus::Working => Color::Green,
+        crate::agent::AgentStatus::Done => Color::Cyan,
+        crate::agent::AgentStatus::Idle => Color::DarkGray,
+    }
+}
+
+/// The footer line for a workspace whose agent said what it is doing, such
+/// as `feat-x › waiting: Allow edit to src/foo.rs?`.
+fn agent_note_line(entry: &WorkspaceEntry) -> Option<Line<'static>> {
+    let note = entry.agent_status.as_ref()?.top_note()?;
+    Some(Line::from(vec![
+        Span::styled(
+            format!(" {} › ", entry.name),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("{}: ", note.status.label()),
+            Style::default().fg(status_color(note.status)),
+        ),
+        Span::raw(note.text.clone()),
+    ]))
+}
+
+/// The preview's agents section, one line per agent that left a message.
+fn agent_notes_text(notes: &[crate::agent::AgentNote]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("--- agents ---\n");
+    for note in notes {
+        text.push_str(&format!("{}: {}\n", note.status.label(), note.text));
+    }
+    text.push('\n');
+    text
+}
+
+fn render_preview(
+    frame: &mut Frame,
+    area: Rect,
+    preview: &PreviewState,
+    notes: &[crate::agent::AgentNote],
+) {
+    let vcs = match preview {
         PreviewState::Hidden => String::new(),
         PreviewState::Loading => "Loading...".to_string(),
         PreviewState::Ready { log, diff_stat } => {
@@ -426,6 +490,9 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
             }
         }
     };
+    // Agent messages come from the last status poll, so they show while the
+    // VCS part is still loading.
+    let content = agent_notes_text(notes) + &vcs;
 
     let paragraph = Paragraph::new(content)
         .block(
@@ -444,13 +511,13 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: &PreviewState) {
 fn render(frame: &mut Frame, app: &mut App) {
     let full_area = frame.area();
 
-    // Reserve 1 line at the bottom for help bar
-    let (main_area, help_area) = if full_area.height > 3 {
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(full_area);
-        (chunks[0], Some(chunks[1]))
-    } else {
-        (full_area, None)
-    };
+    let selected = app.selected_entry_index().map(|i| &app.entries[i]);
+    let note_line = selected.and_then(agent_note_line);
+    let notes = selected
+        .and_then(|e| e.agent_status.as_ref())
+        .map(|s| s.notes.clone())
+        .unwrap_or_default();
+    let (main_area, note_area, help_area) = footer_layout(full_area, note_line.is_some());
 
     // Split horizontally if preview is visible
     let (table_area, preview_area) = if app.show_preview {
@@ -537,11 +604,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     let color = if dim {
                         Color::DarkGray
                     } else {
-                        match summary.most_urgent() {
-                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
-                            Some(crate::agent::AgentStatus::Working) => Color::Green,
-                            _ => Color::DarkGray,
-                        }
+                        summary.most_urgent().map_or(Color::DarkGray, status_color)
                     };
                     (summary.to_string(), color)
                 }
@@ -634,7 +697,11 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     // Render preview pane if visible
     if let Some(preview_area) = preview_area {
-        render_preview(frame, preview_area, &app.preview);
+        render_preview(frame, preview_area, &app.preview, &notes);
+    }
+
+    if let (Some(area), Some(line)) = (note_area, note_line) {
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     // Render help bar at bottom
@@ -807,7 +874,15 @@ fn run_picker_inner<B: Backend>(
                     KeyCode::Char('y') => {
                         let name = name.clone();
                         app.mode = Mode::Browse;
-                        let redirected = on_delete(&name)?;
+                        let redirected = match on_delete(&name) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                // Keep the picker open: the workspace is
+                                // still there, and the reason belongs on screen.
+                                app.status_message = Some(format!("{e:#}"));
+                                continue;
+                            }
+                        };
                         if redirected {
                             return Ok(None);
                         }
@@ -882,7 +957,7 @@ pub fn run_picker(
         std::time::Duration::from_secs(2),
         Arc::clone(&stop),
         agent_sender,
-        move || Some(crate::agent::read_agent_summaries(&agent_repo_dir)),
+        move || Some(crate::agent::current_agent_summaries(&agent_repo_dir)),
     );
 
     // Full VCS refresh thread (~10s)
@@ -1096,13 +1171,13 @@ impl MultiRepoApp {
 fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
     let full_area = frame.area();
 
-    // Reserve 1 line at the bottom for help bar
-    let (main_area, help_area) = if full_area.height > 3 {
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(full_area);
-        (chunks[0], Some(chunks[1]))
-    } else {
-        (full_area, None)
-    };
+    let selected = app.selected_entry_index().map(|i| &app.entries[i]);
+    let note_line = selected.and_then(agent_note_line);
+    let notes = selected
+        .and_then(|e| e.agent_status.as_ref())
+        .map(|s| s.notes.clone())
+        .unwrap_or_default();
+    let (main_area, note_area, help_area) = footer_layout(full_area, note_line.is_some());
 
     // Split horizontally if preview is visible
     let (table_area, preview_area) = if app.show_preview {
@@ -1188,11 +1263,7 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
                     let color = if dim {
                         Color::DarkGray
                     } else {
-                        match summary.most_urgent() {
-                            Some(crate::agent::AgentStatus::Waiting) => Color::Yellow,
-                            Some(crate::agent::AgentStatus::Working) => Color::Green,
-                            _ => Color::DarkGray,
-                        }
+                        summary.most_urgent().map_or(Color::DarkGray, status_color)
                     };
                     (summary.to_string(), color)
                 }
@@ -1237,7 +1308,11 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
 
     // Render preview pane if visible
     if let Some(preview_area) = preview_area {
-        render_preview(frame, preview_area, &app.preview);
+        render_preview(frame, preview_area, &app.preview, &notes);
+    }
+
+    if let (Some(area), Some(line)) = (note_area, note_line) {
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     if let Some(help_area) = help_area {
@@ -1392,9 +1467,13 @@ pub fn run_picker_multi_repo(entries: Vec<WorkspaceEntry>) -> Result<Option<Pick
         Arc::clone(&stop),
         agent_sender,
         move || {
+            // One look at Rex covers every repo.
+            let rex = crate::agent::rex_summaries();
             let mut all_summaries = HashMap::new();
             for (repo_name, agent_dir) in &repo_dirs {
-                for (ws_name, summary) in crate::agent::read_agent_summaries(agent_dir) {
+                for (ws_name, summary) in
+                    crate::agent::read_agent_summaries_with(agent_dir, rex.as_ref())
+                {
                     all_summaries.insert(format!("{}:{}", repo_name, ws_name), summary);
                 }
             }
@@ -1462,6 +1541,8 @@ mod tests {
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
+            rex_pane: None,
+            lease: None,
         }
     }
 
@@ -1537,6 +1618,8 @@ mod tests {
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
+            rex_pane: None,
+            lease: None,
         }
     }
 
@@ -1678,6 +1761,8 @@ mod tests {
             main_repo_path: PathBuf::from("/tmp/repo"),
             vcs_type: crate::vcs::VcsType::Jj,
             agent_status: None,
+            rex_pane: None,
+            lease: None,
         }
     }
 
@@ -1910,6 +1995,91 @@ mod tests {
             "expected status message in help bar, got:\n{}",
             all_text
         );
+    }
+
+    #[test]
+    fn tui_delete_failure_keeps_picker_open_with_reason() {
+        // dwm refuses deletes while Rex panes are open in the workspace, and the
+        // reason belongs on screen rather than ending the picker.
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut keys = vec![KeyCode::Char('d'), KeyCode::Char('y')].into_iter();
+        let mut refreshed = false;
+        let result = run_picker_inner(
+            &mut terminal,
+            App::new(entries),
+            &mut || match keys.next() {
+                Some(code) => Ok(Some(key(code))),
+                None => Ok(Some(key(KeyCode::Esc))),
+            },
+            &mut |_| {
+                anyhow::bail!("workspace 'ws1' is open in Rex (session 'ws1'); close it first")
+            },
+            &mut || {
+                refreshed = true;
+                Ok(vec![])
+            },
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "picker exits only on Esc: {result:?}"
+        );
+        assert!(!refreshed, "nothing was deleted, so nothing to refresh");
+        let all_text = buffer_lines(&terminal).join("\n");
+        assert!(
+            all_text.contains("is open in Rex"),
+            "expected the reason in the help bar, got:\n{all_text}"
+        );
+    }
+
+    #[test]
+    fn tui_shows_the_selected_agents_message() {
+        use crate::agent::{AgentNote, AgentStatus};
+        let mut ws1 = make_named_entry_ranked("ws1", "/tmp/ws1", 0);
+        let mut summary = AgentSummary::default();
+        summary.add(AgentStatus::Waiting);
+        summary.add_note(AgentNote {
+            status: AgentStatus::Waiting,
+            text: "Allow edit to src/foo.rs?".into(),
+        });
+        ws1.agent_status = Some(summary);
+        let entries = vec![ws1, make_named_entry_ranked("ws2", "/tmp/ws2", 1)];
+
+        let render_with_keys = |entries, keys: Vec<KeyCode>| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            let mut keys = keys.into_iter();
+            run_picker_inner(
+                &mut terminal,
+                App::new(entries),
+                &mut || Ok(Some(key(keys.next().unwrap_or(KeyCode::Esc)))),
+                &mut |_| Ok(false),
+                &mut || Ok(vec![]),
+            )
+            .unwrap();
+            buffer_lines(&terminal).join("\n")
+        };
+
+        let text = render_with_keys(entries, vec![KeyCode::Char('p')]);
+        assert!(
+            text.contains("ws1 › waiting: Allow edit to src/foo.rs?"),
+            "footer missing:\n{text}"
+        );
+        assert!(
+            text.contains("--- agents ---"),
+            "preview missing agents:\n{text}"
+        );
+
+        // Moving to a workspace without messages drops the footer.
+        let entries = vec![
+            make_named_entry_ranked("ws1", "/tmp/ws1", 0),
+            make_named_entry_ranked("ws2", "/tmp/ws2", 1),
+        ];
+        let text = render_with_keys(entries, vec![KeyCode::Down]);
+        assert!(!text.contains(" › "), "unexpected footer:\n{text}");
     }
 
     #[test]
@@ -2338,7 +2508,9 @@ mod tests {
             AgentSummary {
                 waiting: 1,
                 working: 0,
+                done: 0,
                 idle: 0,
+                notes: Vec::new(),
             },
         );
         *app.agent_refresh_mailbox.0.lock().unwrap() = Some(summaries);
@@ -2474,7 +2646,9 @@ mod tests {
                     AgentSummary {
                         waiting: 0,
                         working: 1,
+                        done: 0,
                         idle: 0,
+                        notes: Vec::new(),
                     },
                 );
                 Some(map)

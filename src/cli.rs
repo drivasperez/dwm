@@ -19,19 +19,41 @@ pub enum Commands {
         /// Fork from an existing workspace's current change
         #[arg(long, conflicts_with = "at")]
         from: Option<String>,
+        /// Change directory in this shell even inside Rex, instead of opening a
+        /// Rex session for the workspace
+        #[arg(long)]
+        here: bool,
+        /// Command to run in the new workspace's Rex session, after `--`
+        #[arg(last = true, conflicts_with = "here", value_name = "COMMAND")]
+        command: Vec<String>,
     },
     /// List workspaces and pick one interactively
     List {
         /// Show workspaces across all repos
         #[arg(long)]
         all: bool,
+        /// Change directory in this shell even inside Rex, instead of focusing
+        /// or opening a Rex session
+        #[arg(long)]
+        here: bool,
     },
     /// Print a non-interactive workspace summary
-    Status,
+    Status {
+        /// Show workspaces across all repos
+        #[arg(long)]
+        all: bool,
+        /// Print JSON to stdout instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Switch to a workspace by name
     Switch {
         /// Workspace name
         name: String,
+        /// Change directory in this shell even inside Rex, instead of focusing
+        /// or opening a Rex session
+        #[arg(long)]
+        here: bool,
     },
     /// Rename a workspace
     Rename {
@@ -51,13 +73,30 @@ pub enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Lease a workspace from a pool (`<pool>-1`, `<pool>-2`, …) and print
+    /// its path. Reuses a free member with nothing to lose, reset to a fresh
+    /// change, or creates the next one
+    Lease {
+        /// Pool name; members are named `<pool>-<n>`
+        pool: String,
+        /// Revision to start from instead of trunk
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// End a workspace's lease (the current one if omitted)
+    Release {
+        /// Workspace name
+        name: Option<String>,
+    },
+    /// Print the agent skill that teaches coding agents to use dwm
+    Skill,
     /// Process a Claude Code hook event (used internally by hooks)
     #[command(name = "hook-handler", hide = true)]
     HookHandler,
     /// Set up Claude Code hooks for agent status tracking
     #[command(name = "agent-setup", hide = true)]
     AgentSetup,
-    /// Run interactive setup for shell integration and agent hooks
+    /// Run interactive setup for shell integration, agent hooks and skill, and Rex
     Setup,
     /// Print the current version
     Version,
@@ -95,13 +134,25 @@ mod tests {
     #[test]
     fn explicit_list_subcommand() {
         let cli = Cli::try_parse_from(["dwm", "list"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::List { all: false })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List {
+                all: false,
+                here: false
+            })
+        ));
     }
 
     #[test]
     fn list_all_flag() {
         let cli = Cli::try_parse_from(["dwm", "list", "--all"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::List { all: true })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List {
+                all: true,
+                here: false
+            })
+        ));
     }
 
     #[test]
@@ -120,7 +171,7 @@ mod tests {
     fn new_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "new", "my-ws"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: None }) if n == "my-ws")
+            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: None, .. }) if n == "my-ws")
         );
     }
 
@@ -128,7 +179,7 @@ mod tests {
     fn new_with_at_flag() {
         let cli = Cli::try_parse_from(["dwm", "new", "--at", "abc123"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: None, at: Some(r), from: None }) if r == "abc123")
+            matches!(cli.command, Some(Commands::New { name: None, at: Some(r), from: None, .. }) if r == "abc123")
         );
     }
 
@@ -136,7 +187,7 @@ mod tests {
     fn new_with_from_flag() {
         let cli = Cli::try_parse_from(["dwm", "new", "--from", "other-ws"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: None, at: None, from: Some(f) }) if f == "other-ws")
+            matches!(cli.command, Some(Commands::New { name: None, at: None, from: Some(f), .. }) if f == "other-ws")
         );
     }
 
@@ -144,7 +195,7 @@ mod tests {
     fn new_with_from_and_name() {
         let cli = Cli::try_parse_from(["dwm", "new", "my-ws", "--from", "other-ws"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: Some(f) }) if n == "my-ws" && f == "other-ws")
+            matches!(cli.command, Some(Commands::New { name: Some(n), at: None, from: Some(f), .. }) if n == "my-ws" && f == "other-ws")
         );
     }
 
@@ -177,13 +228,21 @@ mod tests {
     #[test]
     fn switch_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "switch", "ws-name"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Switch { name }) if name == "ws-name"));
+        assert!(
+            matches!(cli.command, Some(Commands::Switch { name, here: false }) if name == "ws-name")
+        );
     }
 
     #[test]
     fn status_subcommand_parses() {
         let cli = Cli::try_parse_from(["dwm", "status"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Status)));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Status {
+                all: false,
+                json: false
+            })
+        ));
     }
 
     #[test]
@@ -248,6 +307,90 @@ mod tests {
     fn shell_setup_mutually_exclusive_flags() {
         let err = Cli::try_parse_from(["dwm", "shell-setup", "--bash", "--fish"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn new_takes_a_command_after_double_dash() {
+        let cli =
+            Cli::try_parse_from(["dwm", "new", "ws", "--", "claude", "fix the bug", "--flag"])
+                .unwrap();
+        match cli.command {
+            Some(Commands::New {
+                name,
+                command,
+                here,
+                ..
+            }) => {
+                assert_eq!(name.as_deref(), Some("ws"));
+                assert_eq!(command, vec!["claude", "fix the bug", "--flag"]);
+                assert!(!here);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_without_command_has_empty_command() {
+        let cli = Cli::try_parse_from(["dwm", "new"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::New { command, .. }) if command.is_empty()));
+    }
+
+    #[test]
+    fn new_here_conflicts_with_command() {
+        let err = Cli::try_parse_from(["dwm", "new", "--here", "--", "claude"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn here_flags_parse() {
+        let cli = Cli::try_parse_from(["dwm", "switch", "ws", "--here"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Switch { here: true, .. })
+        ));
+        let cli = Cli::try_parse_from(["dwm", "list", "--here"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List { here: true, .. })
+        ));
+        let cli = Cli::try_parse_from(["dwm", "new", "--here"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::New { here: true, .. })
+        ));
+    }
+
+    #[test]
+    fn status_json_and_all_flags() {
+        let cli = Cli::try_parse_from(["dwm", "status", "--all", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Status {
+                all: true,
+                json: true
+            })
+        ));
+    }
+
+    #[test]
+    fn lease_and_release_parse() {
+        let cli = Cli::try_parse_from(["dwm", "lease", "agents", "--at", "main"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Lease { pool, at: Some(at) }) if pool == "agents" && at == "main")
+        );
+        let cli = Cli::try_parse_from(["dwm", "release"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Release { name: None })
+        ));
+        let cli = Cli::try_parse_from(["dwm", "release", "agents-2"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Release { name: Some(n) }) if n == "agents-2")
+        );
+        assert!(
+            Cli::try_parse_from(["dwm", "lease"]).is_err(),
+            "pool is required"
+        );
     }
 
     #[test]

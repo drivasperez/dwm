@@ -46,15 +46,20 @@ This wraps the `dwm` binary so that selecting a workspace automatically `cd`s in
 dwm new [name]          # create a workspace (name auto-generated if omitted)
 dwm new --at <rev>      # create a workspace starting from a specific revision
 dwm new --from <ws>     # fork from an existing workspace's current change
+dwm new <name> -- <cmd> # in Rex, run a command in the new workspace's session
 dwm list                # interactive TUI picker to switch workspaces
 dwm list --all          # multi-repo dashboard across all repos
 dwm status              # non-interactive workspace summary
+dwm status --json       # the same as JSON on stdout (add --all for every repo)
 dwm switch <name>       # switch to a workspace by name
 dwm rename <old> <new>  # rename a workspace
 dwm delete [name]       # delete a workspace (current one if omitted)
 dwm prune               # list workspaces that are safe to delete (dry run)
 dwm prune --yes         # delete them
-dwm setup               # interactive shell and agent setup
+dwm lease <pool>        # lease a workspace from a pool and print its path
+dwm release [name]      # end a lease (current workspace if omitted)
+dwm setup               # interactive shell, agent, and Rex setup
+dwm skill               # print the skill that teaches coding agents to use dwm
 dwm version             # print the current version
 dwm --version           # same, as a flag
 ```
@@ -62,6 +67,22 @@ dwm --version           # same, as a flag
 `dwm prune` cleans up finished workspaces. It never touches the main workspace, and treats a workspace as prunable only when deleting it loses nothing: for jj, it snapshots the workspace (`jj status`) and then requires that every non-empty commit in `trunk()..<ws>@` is reachable from a remote bookmark, so uncommitted edits and local-only commits both keep it. A stale workspace, or one reporting a sibling operation, is kept rather than repaired with `jj workspace update-stale`, which can overwrite on-disk edits. For git, the worktree needs a clean `git status` (untracked files count, ignored files don't) and no commits that are on neither trunk nor any remote branch. Without `--yes` it only prints each workspace's verdict and reason; with it, prunable workspaces go through the same path as `dwm delete`.
 
 The `Changes` column in `dwm list` and `dwm status` is each workspace's own diff, measured from the point it branched off trunk — a workspace that simply hasn't been rebased is not reported as containing everything that has since landed on trunk.
+
+## Workspace pools
+
+`dwm lease <pool>` hands out a workspace from a pool of numbered workspaces (`<pool>-1`, `<pool>-2`, …) and prints its path, for agents and scripts that need a workspace per task without creating and deleting one each time:
+
+```sh
+cd "$(dwm lease agents)"   # or: dwm lease agents --at <rev>
+# ... work, push ...
+dwm release
+```
+
+It reuses the lowest-numbered member that isn't leased, isn't open in a Rex pane, and has nothing to lose by the same rules as `dwm prune`, moving it to a fresh change on trunk (or `--at <rev>`): for jj a new change on that revision, for git its own `<pool>-N` branch reset to it. Members with uncommitted or unpushed work are skipped, and when none is free dwm creates the next member, running your setup hooks as `dwm new` does. Leasing takes a lock, so agents leasing at the same time never get the same workspace.
+
+`dwm setup` offers to install a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) at `~/.claude/skills/dwm/SKILL.md` that teaches agents to lease, use, and release workspaces, and keeps it current when you run setup after updating dwm. For other agents, `dwm skill` prints the same text.
+
+A lease lasts until `dwm release`. A lease taken from a Rex pane also ends when that pane closes, so a crashed agent doesn't hold its workspace forever. `dwm prune` keeps leased workspaces, and `dwm status --json` shows each lease that still holds.
 
 ## Setup hooks
 
@@ -174,7 +195,7 @@ repository registry location, which the benchmark uses to isolate its fixtures.
 
 dwm can show the status of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents running in your workspaces. The TUI's "Agent" column displays per-workspace counts like `2 waiting, 1 working`.
 
-To set it up, run:
+Inside [Rex](#rex), this needs no setup: Claude Code reports its state to the terminal, and dwm reads it from Rex (see below). For agents running in other terminals, run:
 
 ```sh
 dwm setup
@@ -182,13 +203,27 @@ dwm setup
 
 This installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) into `~/.claude/settings.json` that report agent status to dwm via the `dwm hook-handler` command.
 
-**Statuses:**
+Inside Rex, agents can also say what they are doing or waiting for, such as which permission they need. The picker shows the selected workspace's most urgent message under the table and every agent's message in the preview pane (`p`), and `dwm status --json` includes them.
 
-- **waiting** (yellow) — agent needs user input or permission approval
-- **working** (green) — agent is actively executing
-- **idle** (gray) — agent finished its turn, waiting for the next prompt
+An agent is *waiting* (yellow) when it needs your input or a permission approval, or has stopped with an error. It is *working* (green) while it runs, *done* (cyan) when it has finished something you haven't looked at yet, and *idle* (gray) when it is waiting for its next prompt. Only Rex can tell done apart from idle. Status is tracked per session, so multiple agents in the same workspace are counted independently.
 
-Status is tracked per session, so multiple agents in the same workspace are counted independently.
+## Rex
+
+When dwm runs inside the [Rex](https://www.superlogical.com/rex) terminal (it checks for `REX_SERVER`), it works with Rex's sessions and panes instead of only changing your shell's directory.
+
+dwm reads agent status from Rex. Programs report their state to Rex with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501), which Claude Code supports, and dwm counts each pane that reports a status as an agent in the workspace its working directory is in. Where a workspace has such panes, Rex's count replaces the hook files', so an agent with hooks installed isn't counted twice.
+
+`dwm switch` and choosing a workspace in `dwm list` focus a Rex pane that is already in the workspace, preferring one running an agent. If there isn't one, dwm opens a new Rex session named after the workspace. `dwm new` does the same for the workspace it creates, and anything after `--` is typed into the new session's shell, so `dwm new fix-login -- claude "fix the login redirect"` starts an agent in a fresh workspace. Pass `--here` to `new`, `list`, or `switch` to change directory in the current shell instead. dwm only does this when it runs interactively: when an agent or script runs it without a terminal on stderr, it changes directory as before, so it never moves the Rex app's view from under you. A command after `--` is the exception, since it asks for a session explicitly.
+
+Switching the Rex app to another session needs Remote Control, in Rex's Settings under General. Without it, dwm changes directory as before and says why. A session started with a command is still created, so you can find it in Rex's session list.
+
+`dwm delete` checks for Rex panes in the workspace before removing it, since deleting the directory would leave whatever runs there working in a void. It names the panes and asks whether to close them; the picker's delete refuses instead and shows why. `dwm prune` keeps any workspace that is open in a Rex pane. The pane `dwm` itself runs in doesn't count, because the shell wrapper moves it out. `dwm rename` relabels a Rex session named after the old workspace and lists other panes that were in it, since shells and agents there still have the old path.
+
+`dwm new` and `dwm prune --yes` report their progress on the Rex tab they run in.
+
+`dwm setup` offers to add a "dwm: Switch Workspace…" action to Rex's command palette. It writes `dwm.lua` next to Rex's `init.lua` (with the paths to `dwm` and `rex` and your shell's `PATH`, since programs Rex starts get a minimal one) and adds `require("dwm")` to `init.lua`. The action lists the workspaces of the focused pane's repo, or of every repo, and focuses or opens a session for the one you pick. Bind it to a key in `init.lua` with `rex.bind("cmd+shift+w", "dwm_switch")`. Run `dwm setup` again after moving dwm to update the paths.
+
+Set `DWM_REX=0` to turn all of this off.
 
 ## Build
 

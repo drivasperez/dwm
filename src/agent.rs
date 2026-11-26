@@ -21,6 +21,31 @@ pub enum AgentStatus {
     Working,
     Idle,
     Waiting,
+    /// Finished a piece of work the person hasn't looked at yet. Only Rex
+    /// reports this (OSC 7501 `done`); hooks can't tell it apart from idle.
+    Done,
+}
+
+impl AgentStatus {
+    /// The word dwm shows for this status.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStatus::Working => "working",
+            AgentStatus::Idle => "idle",
+            AgentStatus::Waiting => "waiting",
+            AgentStatus::Done => "done",
+        }
+    }
+
+    /// Higher is more in need of attention.
+    pub fn urgency(self) -> u8 {
+        match self {
+            AgentStatus::Idle => 0,
+            AgentStatus::Done => 1,
+            AgentStatus::Working => 2,
+            AgentStatus::Waiting => 3,
+        }
+    }
 }
 
 /// On-disk representation of a single agent's status file.
@@ -31,17 +56,53 @@ pub struct AgentStatusFile {
     pub updated_at: u64,
 }
 
+/// One agent's own words about what it is doing, as reported to Rex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentNote {
+    pub status: AgentStatus,
+    pub text: String,
+}
+
 /// Aggregated agent counts for a single workspace.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct AgentSummary {
     pub waiting: u32,
     pub working: u32,
+    pub done: u32,
     pub idle: u32,
+    /// Messages from agents that report one (only through Rex), most urgent
+    /// first.
+    pub notes: Vec<AgentNote>,
 }
 
 impl AgentSummary {
     pub fn is_empty(&self) -> bool {
-        self.waiting == 0 && self.working == 0 && self.idle == 0
+        self.waiting == 0 && self.working == 0 && self.done == 0 && self.idle == 0
+    }
+
+    /// Keep an agent's message, most urgent first.
+    pub fn add_note(&mut self, note: AgentNote) {
+        let at = self
+            .notes
+            .iter()
+            .position(|n| n.status.urgency() < note.status.urgency())
+            .unwrap_or(self.notes.len());
+        self.notes.insert(at, note);
+    }
+
+    /// The message most in need of attention, if any agent left one.
+    pub fn top_note(&self) -> Option<&AgentNote> {
+        self.notes.first()
+    }
+
+    /// Count one more agent with the given status.
+    pub fn add(&mut self, status: AgentStatus) {
+        match status {
+            AgentStatus::Working => self.working += 1,
+            AgentStatus::Idle => self.idle += 1,
+            AgentStatus::Waiting => self.waiting += 1,
+            AgentStatus::Done => self.done += 1,
+        }
     }
 
     /// Return the most urgent status present, for color selection.
@@ -50,6 +111,8 @@ impl AgentSummary {
             Some(AgentStatus::Waiting)
         } else if self.working > 0 {
             Some(AgentStatus::Working)
+        } else if self.done > 0 {
+            Some(AgentStatus::Done)
         } else if self.idle > 0 {
             Some(AgentStatus::Idle)
         } else {
@@ -67,6 +130,9 @@ impl fmt::Display for AgentSummary {
         if self.working > 0 {
             parts.push(format!("{} working", self.working));
         }
+        if self.done > 0 {
+            parts.push(format!("{} done", self.done));
+        }
         if self.idle > 0 {
             parts.push(format!("{} idle", self.idle));
         }
@@ -82,6 +148,12 @@ fn agent_status_dir(repo_dir: &Path) -> PathBuf {
 /// Convert a unix timestamp to a [`SystemTime`].
 fn system_time_from_epoch_secs(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+/// Agent summaries for one repo from every source: the status files that
+/// hooks write and, inside Rex, the status Rex's panes report.
+pub fn current_agent_summaries(repo_dir: &Path) -> HashMap<String, AgentSummary> {
+    read_agent_summaries_with(repo_dir, rex_summaries().as_ref())
 }
 
 /// Read all agent status files for a repo and return per-workspace summaries.
@@ -121,15 +193,75 @@ fn read_agent_summaries_at(repo_dir: &Path, now: SystemTime) -> HashMap<String, 
             continue;
         }
 
-        let summary = map.entry(status_file.workspace.clone()).or_default();
-        match status_file.status {
-            AgentStatus::Working => summary.working += 1,
-            AgentStatus::Idle => summary.idle += 1,
-            AgentStatus::Waiting => summary.waiting += 1,
-        }
+        map.entry(status_file.workspace.clone())
+            .or_default()
+            .add(status_file.status);
     }
 
     map
+}
+
+/// Agent summaries derived from Rex panes, keyed by the real path of each
+/// repo's `<repo>.dwm/` directory and then by workspace name.
+pub type RexSummaries = HashMap<PathBuf, HashMap<String, AgentSummary>>;
+
+/// Count every Rex pane that reports a status as one agent in the workspace
+/// its working directory is in.
+pub fn summaries_from_panes(panes: &[crate::rex::Pane]) -> RexSummaries {
+    let mut out = RexSummaries::new();
+    for pane in panes {
+        let (Some(cwd), Some(status)) = (&pane.cwd, pane.agent_status()) else {
+            continue;
+        };
+        let Some((dwm, ws_name)) = resolve_workspace_for_status(cwd) else {
+            continue;
+        };
+        let summary = out
+            .entry(status_key(&dwm))
+            .or_default()
+            .entry(ws_name)
+            .or_default();
+        summary.add(status);
+        if let Some(note) = pane.agent_note() {
+            summary.add_note(note);
+        }
+    }
+    out
+}
+
+/// Ask Rex for agent status, when dwm runs inside Rex. `None` means there is
+/// nothing from Rex to use, and the status files are the only source.
+pub fn rex_summaries() -> Option<RexSummaries> {
+    let rex = crate::rex::connect()?;
+    rex.panes().ok().map(|panes| summaries_from_panes(&panes))
+}
+
+/// Combine the status files' summaries for one repo with Rex's.
+///
+/// For a workspace that has panes reporting status in Rex, Rex's summary
+/// replaces the files'. An agent running in Rex may also have hooks writing
+/// status files, and counting both would count it twice. The files still
+/// cover agents running outside Rex.
+pub fn combine_summaries(
+    repo_dir: &Path,
+    mut from_files: HashMap<String, AgentSummary>,
+    rex: Option<&RexSummaries>,
+) -> HashMap<String, AgentSummary> {
+    if let Some(from_rex) = rex.and_then(|r| r.get(&status_key(repo_dir))) {
+        for (ws, summary) in from_rex {
+            from_files.insert(ws.clone(), summary.clone());
+        }
+    }
+    from_files
+}
+
+/// Agent summaries for one repo from the status files and, given a Rex scan,
+/// from Rex.
+pub fn read_agent_summaries_with(
+    repo_dir: &Path,
+    rex: Option<&RexSummaries>,
+) -> HashMap<String, AgentSummary> {
+    combine_summaries(repo_dir, read_agent_summaries(repo_dir), rex)
 }
 
 /// Write an agent status file for the given session.
@@ -242,6 +374,45 @@ fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
+/// Like [`resolve_workspace_from_cwd`], but a repo needn't have a `<repo>.dwm/`
+/// directory yet: a pane anywhere in a repo counts toward its main
+/// workspace. Only for reading status; the hook handler must not create dwm
+/// directories in every repo an agent runs in.
+fn resolve_workspace_for_status(cwd: &Path) -> Option<(PathBuf, String)> {
+    if let Some((root, ws_name, _)) = workspace::find_dwm_workspace(cwd) {
+        return Some((workspace::dwm_dir(&root), ws_name));
+    }
+    let mut current = cwd.to_path_buf();
+    loop {
+        let vcs = if current.join(".jj").is_dir() {
+            Some(VcsType::Jj)
+        } else if current.join(".git").exists() {
+            Some(VcsType::Git)
+        } else {
+            None
+        };
+        if let Some(vcs) = vcs {
+            return Some((
+                workspace::dwm_dir(&current),
+                vcs.main_workspace_name().to_string(),
+            ));
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// The key a repo's Rex summaries are stored under: its `<repo>.dwm/` path
+/// with symlinks resolved in the parent, which exists even when the dwm
+/// directory doesn't.
+fn status_key(dwm: &Path) -> PathBuf {
+    match (dwm.parent(), dwm.file_name()) {
+        (Some(parent), Some(name)) => crate::rex::real_path(parent).join(name),
+        _ => dwm.to_path_buf(),
+    }
+}
+
 /// Process a Claude Code hook event from stdin and update agent status files.
 pub fn handle_hook() -> Result<()> {
     let mut input = String::new();
@@ -326,7 +497,7 @@ fn dwm_hook_config() -> serde_json::Value {
     })
 }
 
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     if let Ok(home) = std::env::var("HOME")
         && let Ok(rest) = path.strip_prefix(&home)
     {
@@ -416,6 +587,20 @@ fn merge_dwm_hooks(mut settings: serde_json::Value) -> Result<serde_json::Value>
     Ok(settings)
 }
 
+/// Read a yes/no answer from the terminal. Anything but `y` is no, as is
+/// having no terminal to ask.
+pub(crate) fn confirm_from_tty() -> Result<bool> {
+    let response = match std::fs::File::open("/dev/tty") {
+        Ok(f) => {
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(f), &mut line)?;
+            line
+        }
+        Err(_) => String::new(),
+    };
+    Ok(response.trim().eq_ignore_ascii_case("y"))
+}
+
 /// Install dwm hook configuration into ~/.claude/settings.json.
 pub fn setup_agent_hooks() -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
@@ -449,17 +634,7 @@ pub fn setup_agent_hooks() -> Result<()> {
         "?".bold().cyan(),
         display.bold()
     );
-    let tty = std::fs::File::open("/dev/tty");
-    let response = match tty {
-        Ok(f) => {
-            let mut line = String::new();
-            std::io::BufRead::read_line(&mut std::io::BufReader::new(f), &mut line)?;
-            line
-        }
-        Err(_) => String::new(),
-    };
-
-    if !response.trim().eq_ignore_ascii_case("y") {
+    if !confirm_from_tty()? {
         return Ok(());
     }
 
@@ -602,7 +777,9 @@ mod tests {
         let s = AgentSummary {
             waiting: 2,
             working: 1,
+            done: 0,
             idle: 1,
+            notes: Vec::new(),
         };
         assert_eq!(s.to_string(), "2 waiting, 1 working, 1 idle");
     }
@@ -612,9 +789,145 @@ mod tests {
         let s = AgentSummary {
             waiting: 0,
             working: 1,
+            done: 0,
             idle: 0,
+            notes: Vec::new(),
         };
         assert_eq!(s.to_string(), "1 working");
+    }
+
+    #[test]
+    fn summary_display_includes_done() {
+        let mut s = AgentSummary::default();
+        s.add(AgentStatus::Done);
+        s.add(AgentStatus::Idle);
+        assert_eq!(s.to_string(), "1 done, 1 idle");
+        assert_eq!(s.most_urgent(), Some(AgentStatus::Done));
+        s.add(AgentStatus::Working);
+        assert_eq!(s.most_urgent(), Some(AgentStatus::Working));
+    }
+
+    #[test]
+    fn notes_are_kept_most_urgent_first() {
+        let note = |status, text: &str| AgentNote {
+            status,
+            text: text.into(),
+        };
+        let mut s = AgentSummary::default();
+        s.add_note(note(AgentStatus::Idle, "ready"));
+        s.add_note(note(AgentStatus::Working, "tests"));
+        s.add_note(note(AgentStatus::Waiting, "allow?"));
+        s.add_note(note(AgentStatus::Working, "build"));
+        let texts: Vec<_> = s.notes.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(texts, ["allow?", "tests", "build", "ready"]);
+        assert_eq!(s.top_note().unwrap().text, "allow?");
+    }
+
+    #[test]
+    fn status_urgency_order() {
+        let mut all = [
+            AgentStatus::Working,
+            AgentStatus::Idle,
+            AgentStatus::Waiting,
+            AgentStatus::Done,
+        ];
+        all.sort_by_key(|s| s.urgency());
+        assert_eq!(
+            all,
+            [
+                AgentStatus::Idle,
+                AgentStatus::Done,
+                AgentStatus::Working,
+                AgentStatus::Waiting
+            ]
+        );
+    }
+
+    // ── Rex as a status source ──────────────────────────────────────
+
+    fn rex_repo(tmp: &Path) -> (PathBuf, PathBuf) {
+        let repo = tmp.join("repo");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        let ws = workspace::worktrees_dir(&repo).join("feat");
+        fs::create_dir_all(ws.join("src")).unwrap();
+        (repo, ws)
+    }
+
+    #[test]
+    fn summaries_from_panes_maps_cwd_to_workspace() {
+        use crate::rex::ProgramState::{Blocked, Done, Working};
+        use crate::rex::tests::pane;
+        let tmp = TempDir::new().unwrap();
+        let (repo, ws) = rex_repo(tmp.path());
+        let outside = tmp.path().join("elsewhere");
+        fs::create_dir_all(&outside).unwrap();
+        let panes = vec![
+            pane("1", "s", &ws.join("src"), &[Working]),
+            pane("2", "s", &ws, &[Blocked]),
+            pane("3", "s", &repo, &[Done]),
+            pane("4", "s", &ws, &[]),             // a plain shell
+            pane("5", "s", &outside, &[Working]), // not a dwm repo
+        ];
+        let mut panes = panes;
+        panes[1].records[0].msg = Some("Allow edit to src/foo.rs?".into());
+        let map = summaries_from_panes(&panes);
+        assert_eq!(map.len(), 1, "{map:?}");
+        let repo_map = &map[&status_key(&workspace::dwm_dir(&repo))];
+        let feat = &repo_map["feat"];
+        assert_eq!((feat.working, feat.waiting, feat.idle), (1, 1, 0));
+        let note = feat.top_note().unwrap();
+        assert_eq!(
+            (note.status, note.text.as_str()),
+            (AgentStatus::Waiting, "Allow edit to src/foo.rs?")
+        );
+        assert_eq!(repo_map["default"].done, 1);
+    }
+
+    #[test]
+    fn rex_status_reaches_main_workspace_of_repo_without_dwm_dir() {
+        // Regression: a repo that never had a workspace has no `<repo>.dwm/`,
+        // so its main workspace showed a Rex pane but no agent status.
+        use crate::rex::ProgramState::Working;
+        use crate::rex::tests::pane;
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("fresh");
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        let dwm = workspace::dwm_dir(&repo);
+        assert!(!dwm.exists());
+
+        let rex = summaries_from_panes(&[pane("1", "s", &repo.join("src"), &[Working])]);
+        let combined = read_agent_summaries_with(&dwm, Some(&rex));
+        assert_eq!(combined["default"].working, 1);
+        assert!(!dwm.exists(), "reading status must not create the dwm dir");
+    }
+
+    #[test]
+    fn rex_replaces_file_status_per_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let (repo, _) = rex_repo(tmp.path());
+        let dwm = workspace::dwm_dir(&repo);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Hooks see two agents: one also running in Rex, one elsewhere.
+        write_status_file(&dwm, "s1", "feat", "working", now);
+        write_status_file(&dwm, "s2", "other", "waiting", now);
+
+        let mut from_rex = HashMap::new();
+        let mut feat = AgentSummary::default();
+        feat.add(AgentStatus::Done);
+        from_rex.insert("feat".to_string(), feat.clone());
+        let mut rex = RexSummaries::new();
+        rex.insert(status_key(&dwm), from_rex);
+
+        let combined = read_agent_summaries_with(&dwm, Some(&rex));
+        assert_eq!(combined["feat"], feat, "Rex wins where it has panes");
+        assert_eq!(combined["other"].waiting, 1, "files cover the rest");
+
+        let files_only = read_agent_summaries_with(&dwm, None);
+        assert_eq!(files_only["feat"].working, 1);
     }
 
     #[test]
@@ -630,7 +943,9 @@ mod tests {
             AgentSummary {
                 waiting: 1,
                 working: 0,
-                idle: 0
+                done: 0,
+                idle: 0,
+                notes: Vec::new(),
             }
             .most_urgent(),
             Some(AgentStatus::Waiting)
@@ -639,7 +954,9 @@ mod tests {
             AgentSummary {
                 waiting: 0,
                 working: 1,
-                idle: 1
+                done: 0,
+                idle: 1,
+                notes: Vec::new(),
             }
             .most_urgent(),
             Some(AgentStatus::Working)
@@ -648,7 +965,9 @@ mod tests {
             AgentSummary {
                 waiting: 0,
                 working: 0,
-                idle: 1
+                done: 0,
+                idle: 1,
+                notes: Vec::new(),
             }
             .most_urgent(),
             Some(AgentStatus::Idle)

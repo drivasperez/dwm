@@ -385,9 +385,40 @@ copy_mode = "auto"
         your workspaces. The TUI's "Agent" column displays per-workspace counts like
         <code>2 waiting, 1 working</code>.
       </p>
-      <p>To set it up, run:</p>
+      <p>
+        Inside Rex this needs no setup, because Claude Code reports its state to the terminal and
+        dwm reads it from Rex. For agents in other terminals, run:
+      </p>
       <pre data-copyable="true"><code>dwm setup</code></pre>
       <p>This installs Claude Code hooks that report agent status to dwm.</p>
+    </div>
+
+    <div class="section">
+      <h2>REX</h2>
+      <p>
+        Inside the <a href="https://www.superlogical.com/rex">Rex</a> terminal, dwm works with
+        Rex's sessions and panes. It reads agent status from the
+        <a href="https://www.superlogical.com/rex/docs/build/program-status">Program Status Protocol</a>
+        (OSC 7501), which Claude Code supports, counting each pane that reports a status as an agent
+        in the workspace it is in.
+      </p>
+      <p>
+        <code>dwm switch</code> and the picker focus a pane already in the workspace, or open a new
+        Rex session named after it. <code>dwm new</code> opens a session for the new workspace and
+        types anything after <code>--</code> into it, so
+        <code>dwm new fix-login -- claude "fix the login redirect"</code> starts an agent there.
+        Pass <code>--here</code> to change directory instead; agents and scripts that run dwm without
+        a terminal always do. Switching sessions needs Remote Control
+        in Rex's Settings under General; without it dwm changes directory and says why.
+      </p>
+      <p>
+        The picker also shows what the selected workspace's agent says it is doing or waiting for.
+        <code>dwm delete</code> asks before closing Rex panes still open in the workspace, the picker
+        refuses, and <code>dwm prune</code> keeps such workspaces. <code>dwm rename</code> relabels a
+        session named after the workspace. <code>dwm new</code> and <code>dwm prune --yes</code>
+        report progress on their Rex tab, and <code>dwm setup</code> can add a "dwm: Switch
+        Workspace…" action to Rex's command palette. Set <code>DWM_REX=0</code> to turn this off.
+      </p>
     </div>
 
     <div class="section">
@@ -402,6 +433,9 @@ copy_mode = "auto"
         <dt>dwm new --from &lt;ws&gt;</dt>
         <dd>Fork from an existing workspace's current change</dd>
 
+        <dt>dwm new [name] -- &lt;cmd&gt;</dt>
+        <dd>In Rex, run a command in the new workspace's session</dd>
+
         <dt>dwm list</dt>
         <dd>Interactive TUI picker to switch workspaces</dd>
 
@@ -410,6 +444,9 @@ copy_mode = "auto"
 
         <dt>dwm status</dt>
         <dd>Non-interactive workspace summary</dd>
+
+        <dt>dwm status --json [--all]</dt>
+        <dd>The same as JSON on stdout, for one repo or all of them</dd>
 
         <dt>dwm switch &lt;name&gt;</dt>
         <dd>Switch to a workspace by name</dd>
@@ -426,8 +463,21 @@ copy_mode = "auto"
           from a remote. Dry run unless <code>--yes</code> is passed
         </dd>
 
+        <dt>dwm lease &lt;pool&gt; [--at &lt;rev&gt;]</dt>
+        <dd>
+          Lease a workspace from a pool (<code>&lt;pool&gt;-1</code>, <code>&lt;pool&gt;-2</code>, …)
+          and print its path. Reuses a free member with nothing to lose, reset to a fresh change on
+          trunk, or creates the next one
+        </dd>
+
+        <dt>dwm release [name]</dt>
+        <dd>End a lease (current workspace if omitted). Leases taken in Rex also end when their pane closes</dd>
+
         <dt>dwm setup</dt>
-        <dd>Interactive shell and agent setup</dd>
+        <dd>Interactive shell, agent, and Rex setup, including a Claude Code skill that teaches agents to use dwm</dd>
+
+        <dt>dwm skill</dt>
+        <dd>Print that skill, for other coding agents</dd>
 
         <dt>dwm version</dt>
         <dd>Print the current version (also available as <code>dwm --version</code>)</dd>
