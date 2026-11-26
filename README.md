@@ -159,8 +159,8 @@ content. These files go through the same checks, copy mode and conflict rules as
 Setup still runs afterward to reconcile dependencies with the destination's
 lockfile. Some artifacts, notably Python virtual environments and caches with
 absolute paths, cannot be reused reliably across directories. A copying failure
-returns an error and leaves the workspace available for inspection without
-running setup. Reports go to stderr; stdout remains the shell's destination path.
+returns an error without running setup, and removes the new workspace again
+(with its git branch) so the same name can be retried. Reports go to stderr; stdout remains the shell's destination path.
 This works with Git and Git-backed jj repositories (including non-colocated jj).
 The experimental jj simple backend does not support ignored-file copying.
 

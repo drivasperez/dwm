@@ -124,6 +124,14 @@ pub trait VcsBackend: Send + Sync {
     ) -> Result<()>;
     /// Remove the workspace/worktree from VCS tracking and delete its directory.
     fn workspace_remove(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()>;
+
+    /// Undo a workspace this dwm command just created, including anything
+    /// created alongside it, such as git's branch for the worktree. Only for
+    /// cleaning up after a failed `dwm new`: unlike [`Self::workspace_remove`]
+    /// it may discard state that would otherwise be kept.
+    fn discard_new_workspace(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()> {
+        self.workspace_remove(repo_dir, name, ws_path)
+    }
     /// Rename a workspace: update VCS metadata and move the directory.
     /// `old_path` and `new_path` are the workspace directories on disk.
     fn workspace_rename(

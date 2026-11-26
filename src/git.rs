@@ -269,6 +269,13 @@ impl VcsBackend for GitBackend {
         Ok(())
     }
 
+    fn discard_new_workspace(&self, repo_dir: &Path, name: &str, ws_path: &Path) -> Result<()> {
+        self.workspace_remove(repo_dir, name, ws_path)?;
+        // `workspace_add` made this branch with `-b`, so it is new and empty.
+        run_git_in(repo_dir, &["branch", "-D", name])?;
+        Ok(())
+    }
+
     fn workspace_remove(&self, repo_dir: &Path, _name: &str, ws_path: &Path) -> Result<()> {
         let path_str = ws_path.to_string_lossy();
         run_git_in(repo_dir, &["worktree", "remove", &path_str, "--force"])?;
