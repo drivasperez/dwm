@@ -19,26 +19,36 @@ fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Try to detect the trunk/main branch name.
-/// Checks: main, master, then origin/HEAD symbolic ref.
+/// Detect the trunk, as a full ref usable anywhere git takes a revision.
+///
+/// The remote's default branch (`origin/HEAD`) comes first: it names the real
+/// trunk even when a stale local `main` or `master` exists, or when there is no
+/// local branch of that name at all. Without a remote, local `main` then
+/// `master`.
 fn detect_trunk(dir: &Path) -> String {
-    // Check if "main" branch exists
-    if run_git_in(dir, &["rev-parse", "--verify", "refs/heads/main"]).is_ok() {
-        return "main".to_string();
+    let exists = |r: &str| run_git_in(dir, &["rev-parse", "--verify", "--quiet", r]).is_ok();
+    if let Ok(out) = run_git_in(
+        dir,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) && let Some(trunk) = remote_default_ref(&out)
+        && exists(&trunk)
+    {
+        return trunk;
     }
-    // Check if "master" branch exists
-    if run_git_in(dir, &["rev-parse", "--verify", "refs/heads/master"]).is_ok() {
-        return "master".to_string();
-    }
-    // Try origin/HEAD
-    if let Ok(out) = run_git_in(dir, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
-        let trimmed = out.trim();
-        if let Some(branch) = trimmed.strip_prefix("refs/remotes/origin/") {
-            return branch.to_string();
+    for local in ["refs/heads/main", "refs/heads/master"] {
+        if exists(local) {
+            return local.to_string();
         }
     }
-    // Fallback
-    "main".to_string()
+    "refs/heads/main".to_string()
+}
+
+/// The remote-tracking ref `git symbolic-ref refs/remotes/origin/HEAD`
+/// printed, if it points at a branch of origin.
+fn remote_default_ref(symbolic_ref_output: &str) -> Option<String> {
+    let target = symbolic_ref_output.trim();
+    let branch = target.strip_prefix("refs/remotes/origin/")?;
+    (!branch.is_empty() && branch != "HEAD").then(|| target.to_string())
 }
 
 /// One record from `git worktree list --porcelain`.
@@ -133,7 +143,7 @@ fn unpushed_log_args(trunk: &str) -> Vec<String> {
         "HEAD",
         "--not",
         "--remotes",
-        &format!("refs/heads/{trunk}"),
+        trunk,
         "--",
     ]
     .iter()
@@ -436,7 +446,7 @@ mod tests {
 
     #[test]
     fn unpushed_log_args_negate_trunk_and_remotes() {
-        let args = unpushed_log_args("main");
+        let args = unpushed_log_args("refs/heads/main");
         let not = args.iter().position(|a| a == "--not").unwrap();
         let head = args.iter().position(|a| a == "HEAD").unwrap();
         assert!(head < not);
@@ -696,7 +706,7 @@ branch refs/heads/main
             ])
             .output();
         let trunk = detect_trunk(dir.path());
-        assert_eq!(trunk, "main");
+        assert_eq!(trunk, "refs/heads/main");
     }
 
     #[test]
@@ -717,6 +727,67 @@ branch refs/heads/main
             ])
             .output();
         let trunk = detect_trunk(dir.path());
-        assert_eq!(trunk, "master");
+        assert_eq!(trunk, "refs/heads/master");
+    }
+
+    #[test]
+    fn remote_default_ref_reads_symbolic_ref_output() {
+        assert_eq!(
+            remote_default_ref("refs/remotes/origin/develop\n").as_deref(),
+            Some("refs/remotes/origin/develop")
+        );
+        assert_eq!(
+            remote_default_ref("refs/remotes/origin/release/2.x").as_deref(),
+            Some("refs/remotes/origin/release/2.x")
+        );
+        assert_eq!(remote_default_ref("refs/remotes/origin/"), None);
+        assert_eq!(remote_default_ref("refs/remotes/upstream/main"), None);
+        assert_eq!(remote_default_ref(""), None);
+    }
+
+    /// Regression: a stale local `main` won over the remote's real default
+    /// branch, so diffs, merge checks and prune compared against the wrong one.
+    #[test]
+    fn integration_detect_trunk_prefers_origin_head_over_local_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let upstream = tmp.path().join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q", "-b", "develop"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "init"]);
+
+        let clone = tmp.path().join("clone");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                upstream.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        // A local `main` that isn't the project's trunk.
+        git(&clone, &["branch", "main"]);
+
+        assert_eq!(detect_trunk(&clone), "refs/remotes/origin/develop");
+        // The ref works as a range endpoint without a local `develop`.
+        git(&clone, &["checkout", "-q", "main"]);
+        git(&clone, &["branch", "-q", "-D", "develop"]);
+        git(&clone, &["log", "-q", &trunk_range(&detect_trunk(&clone))]);
     }
 }
