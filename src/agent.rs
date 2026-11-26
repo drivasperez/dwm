@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -264,6 +264,27 @@ pub fn read_agent_summaries_with(
     combine_summaries(repo_dir, read_agent_summaries(repo_dir), rex)
 }
 
+/// Whether `session_id` is safe to use as a status file name.
+///
+/// It comes from hook input, and it is joined onto the status directory, so
+/// anything that could leave that directory (`/`, `\`, `..`) or hide a file
+/// (a leading `.`) is refused. Claude Code's ids are UUIDs, well inside this.
+fn is_safe_session_id(session_id: &str) -> bool {
+    (1..=128).contains(&session_id.len())
+        && !session_id.starts_with('.')
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// The status file for a session, or an error for an unsafe id.
+fn status_file_path(repo_dir: &Path, session_id: &str) -> Result<PathBuf> {
+    if !is_safe_session_id(session_id) {
+        bail!("refusing unsafe agent session id {session_id:?}");
+    }
+    Ok(agent_status_dir(repo_dir).join(format!("{session_id}.json")))
+}
+
 /// Write an agent status file for the given session.
 pub fn write_agent_status(
     repo_dir: &Path,
@@ -271,6 +292,7 @@ pub fn write_agent_status(
     workspace: &str,
     status: AgentStatus,
 ) -> Result<()> {
+    let final_path = status_file_path(repo_dir, session_id)?;
     let dir = agent_status_dir(repo_dir);
     fs::create_dir_all(&dir)?;
 
@@ -286,7 +308,6 @@ pub fn write_agent_status(
     let json = serde_json::to_string(&file)?;
 
     // Atomic write: write to temp file, then rename
-    let final_path = dir.join(format!("{}.json", session_id));
     let tmp_path = dir.join(format!(".tmp-{}.json", session_id));
     fs::write(&tmp_path, &json)?;
     fs::rename(&tmp_path, &final_path)?;
@@ -296,7 +317,7 @@ pub fn write_agent_status(
 
 /// Remove the agent status file for the given session.
 pub fn remove_agent_status(repo_dir: &Path, session_id: &str) -> Result<()> {
-    let path = agent_status_dir(repo_dir).join(format!("{}.json", session_id));
+    let path = status_file_path(repo_dir, session_id)?;
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -431,8 +452,9 @@ pub fn handle_hook() -> Result<()> {
         .unwrap_or("");
     let cwd_str = json.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
 
-    if session_id.is_empty() || cwd_str.is_empty() {
-        return Ok(()); // silently ignore incomplete data
+    // A hook must never fail the agent's turn, so bad input is ignored.
+    if !is_safe_session_id(session_id) || cwd_str.is_empty() {
+        return Ok(());
     }
 
     let cwd = PathBuf::from(cwd_str);
@@ -674,6 +696,37 @@ mod tests {
             workspace, status, updated_at
         );
         fs::write(agent_dir.join(format!("{}.json", session_id)), content).unwrap();
+    }
+
+    #[test]
+    fn session_ids_that_could_escape_the_status_dir_are_refused() {
+        assert!(is_safe_session_id("0b6a3a8e-5c2f-4f3b-9d0e-6a1f2b3c4d5e"));
+        assert!(is_safe_session_id("session_1.v2"));
+        for bad in [
+            "", "..", "../x", "a/b", "a\\b", ".hidden", "a\0b", "a b", "a\nb",
+        ] {
+            assert!(!is_safe_session_id(bad), "{bad:?} must be refused");
+        }
+        assert!(!is_safe_session_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn writing_or_removing_status_with_unsafe_id_touches_nothing_outside() {
+        // Regression: the session id was joined onto the status directory
+        // unchecked, so `../victim` wrote or deleted `<repo>.dwm/victim.json`.
+        let dir = TempDir::new().unwrap();
+        let victim = dir.path().join("victim.json");
+        fs::write(&victim, "keep").unwrap();
+
+        assert!(write_agent_status(dir.path(), "../victim", "ws", AgentStatus::Working).is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(remove_agent_status(dir.path(), "../victim").is_err());
+        assert!(victim.exists());
+
+        write_agent_status(dir.path(), "ok-session", "ws", AgentStatus::Idle).unwrap();
+        assert!(dir.path().join("agent-status/ok-session.json").exists());
+        remove_agent_status(dir.path(), "ok-session").unwrap();
+        assert!(!dir.path().join("agent-status/ok-session.json").exists());
     }
 
     #[test]
