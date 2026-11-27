@@ -1,6 +1,7 @@
 {
   "name": "dwm",
   "compatibility_date": "2025-09-30",
+  "previews": {},
   "assets": {
     "directory": "./dist",
   },
