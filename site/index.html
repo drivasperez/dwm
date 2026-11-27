@@ -416,8 +416,10 @@ copy_mode = "auto"
         <code>dwm delete</code> asks before closing Rex panes still open in the workspace, the picker
         refuses, and <code>dwm prune</code> keeps such workspaces. <code>dwm rename</code> relabels a
         session named after the workspace. <code>dwm new</code> and <code>dwm prune --yes</code>
-        report progress on their Rex tab, and <code>dwm setup</code> can add a "dwm: Switch
-        Workspace…" action to Rex's command palette. Set <code>DWM_REX=0</code> to turn this off.
+        report progress on their Rex tab. <code>dwm setup</code> adds Switch Workspace, New
+        Workspace (with an optional shell command), and Prune Workspaces (with preview and
+        confirmation) to Rex's command palette. New and Prune use the focused terminal's repo,
+        or let you choose a registered repo. Set <code>DWM_REX=0</code> to turn off CLI integration.
       </p>
     </div>
 
