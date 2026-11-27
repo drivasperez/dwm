@@ -241,3 +241,7 @@ cargo t          # run tests (uses cargo-nextest)
 cargo clippy     # lint
 lua src/rex/palette_test.lua  # Rex palette tests (no running Rex server needed)
 ```
+
+## License
+
+[MIT](LICENSE)
