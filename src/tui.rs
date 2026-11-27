@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::agent::AgentSummary;
+use crate::vcs::DiffStat;
 use crate::workspace::{WorkspaceEntry, format_time_ago};
 
 /// Shared stop signal that can wake sleeping threads immediately.
@@ -420,6 +421,65 @@ fn footer_layout(area: Rect, with_note: bool) -> (Rect, Option<Rect>, Option<Rec
     }
 }
 
+/// Return the display name for a workspace entry (with "(main)" or "[stale]" suffix).
+fn entry_display_name(entry: &WorkspaceEntry) -> String {
+    if entry.is_main {
+        format!("{} (main)", entry.name)
+    } else if entry.is_stale {
+        format!("{} [stale]", entry.name)
+    } else {
+        entry.name.clone()
+    }
+}
+
+/// Format the diff stat as a compact changes string.
+fn format_changes_text(stat: &DiffStat) -> String {
+    if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
+        "clean".to_string()
+    } else {
+        let mut parts = Vec::new();
+        if stat.insertions > 0 {
+            parts.push(format!("+{}", stat.insertions));
+        }
+        if stat.deletions > 0 {
+            parts.push(format!("-{}", stat.deletions));
+        }
+        if parts.is_empty() {
+            format!("{} files", stat.files_changed)
+        } else {
+            parts.join(" ")
+        }
+    }
+}
+
+/// Return the foreground color for a changes cell.
+fn changes_color(stat: &DiffStat, dim: bool) -> Color {
+    if dim {
+        Color::DarkGray
+    } else if stat.deletions > stat.insertions {
+        Color::Red
+    } else if stat.insertions > 0 {
+        Color::Green
+    } else {
+        Color::DarkGray
+    }
+}
+
+/// Return the agent cell (text, color) for a workspace entry.
+fn agent_cell(entry: &WorkspaceEntry, dim: bool) -> (String, Color) {
+    match &entry.agent_status {
+        Some(summary) if !summary.is_empty() => {
+            let color = if dim {
+                Color::DarkGray
+            } else {
+                summary.most_urgent().map_or(Color::DarkGray, status_color)
+            };
+            (summary.to_string(), color)
+        }
+        _ => (String::new(), Color::DarkGray),
+    }
+}
+
 /// The color an agent status is shown in.
 fn status_color(status: crate::agent::AgentStatus) -> Color {
     match status {
@@ -547,69 +607,23 @@ fn render(frame: &mut Frame, app: &mut App) {
     let mut rows: Vec<Row> = visible
         .iter()
         .map(|entry| {
-            let name_text = if entry.is_main {
-                format!("{} (main)", entry.name)
-            } else if entry.is_stale {
-                format!("{} [stale]", entry.name)
-            } else {
-                entry.name.clone()
-            };
-
+            let name_text = entry_display_name(entry);
             let change_text = entry.change_id.clone();
-
             let desc_text = entry.description.lines().next().unwrap_or("").to_string();
-
             let bookmarks_text = entry.bookmarks.join(", ");
-
             let time_text = format_time_ago(entry.last_modified);
 
             let stat = &entry.diff_stat;
-            let changes_text =
-                if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
-                    "clean".to_string()
-                } else {
-                    let mut parts = Vec::new();
-                    if stat.insertions > 0 {
-                        parts.push(format!("+{}", stat.insertions));
-                    }
-                    if stat.deletions > 0 {
-                        parts.push(format!("-{}", stat.deletions));
-                    }
-                    if parts.is_empty() {
-                        format!("{} files", stat.files_changed)
-                    } else {
-                        parts.join(" ")
-                    }
-                };
+            let changes_text = format_changes_text(stat);
 
-            // Use dim styling for stale workspaces
             let dim = entry.is_stale;
             let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
             let change_fg = if dim { Color::DarkGray } else { Color::Magenta };
             let desc_fg = if dim { Color::DarkGray } else { Color::White };
             let bookmark_fg = if dim { Color::DarkGray } else { Color::Blue };
             let time_fg = if dim { Color::DarkGray } else { Color::Yellow };
-            let changes_fg = if dim {
-                Color::DarkGray
-            } else if stat.deletions > stat.insertions {
-                Color::Red
-            } else if stat.insertions > 0 {
-                Color::Green
-            } else {
-                Color::DarkGray
-            };
-
-            let (agent_text, agent_fg) = match &entry.agent_status {
-                Some(summary) if !summary.is_empty() => {
-                    let color = if dim {
-                        Color::DarkGray
-                    } else {
-                        summary.most_urgent().map_or(Color::DarkGray, status_color)
-                    };
-                    (summary.to_string(), color)
-                }
-                _ => (String::new(), Color::DarkGray),
-            };
+            let changes_fg = changes_color(stat, dim);
+            let (agent_text, agent_fg) = agent_cell(entry, dim);
 
             Row::new(vec![
                 Cell::from(name_text).style(Style::default().fg(name_fg)),
@@ -1209,38 +1223,14 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
         .iter()
         .map(|entry| {
             let repo_text = entry.repo_name.as_deref().unwrap_or("").to_string();
-
-            let name_text = if entry.is_main {
-                format!("{} (main)", entry.name)
-            } else if entry.is_stale {
-                format!("{} [stale]", entry.name)
-            } else {
-                entry.name.clone()
-            };
-
+            let name_text = entry_display_name(entry);
             let change_text = entry.change_id.clone();
             let desc_text = entry.description.lines().next().unwrap_or("").to_string();
             let bookmarks_text = entry.bookmarks.join(", ");
             let time_text = format_time_ago(entry.last_modified);
 
             let stat = &entry.diff_stat;
-            let changes_text =
-                if stat.files_changed == 0 && stat.insertions == 0 && stat.deletions == 0 {
-                    "clean".to_string()
-                } else {
-                    let mut parts = Vec::new();
-                    if stat.insertions > 0 {
-                        parts.push(format!("+{}", stat.insertions));
-                    }
-                    if stat.deletions > 0 {
-                        parts.push(format!("-{}", stat.deletions));
-                    }
-                    if parts.is_empty() {
-                        format!("{} files", stat.files_changed)
-                    } else {
-                        parts.join(" ")
-                    }
-                };
+            let changes_text = format_changes_text(stat);
 
             let dim = entry.is_stale;
             let name_fg = if dim { Color::DarkGray } else { Color::Cyan };
@@ -1248,27 +1238,8 @@ fn render_multi_repo(frame: &mut Frame, app: &mut MultiRepoApp) {
             let desc_fg = if dim { Color::DarkGray } else { Color::White };
             let bookmark_fg = if dim { Color::DarkGray } else { Color::Blue };
             let time_fg = if dim { Color::DarkGray } else { Color::Yellow };
-            let changes_fg = if dim {
-                Color::DarkGray
-            } else if stat.deletions > stat.insertions {
-                Color::Red
-            } else if stat.insertions > 0 {
-                Color::Green
-            } else {
-                Color::DarkGray
-            };
-
-            let (agent_text, agent_fg) = match &entry.agent_status {
-                Some(summary) if !summary.is_empty() => {
-                    let color = if dim {
-                        Color::DarkGray
-                    } else {
-                        summary.most_urgent().map_or(Color::DarkGray, status_color)
-                    };
-                    (summary.to_string(), color)
-                }
-                _ => (String::new(), Color::DarkGray),
-            };
+            let changes_fg = changes_color(stat, dim);
+            let (agent_text, agent_fg) = agent_cell(entry, dim);
 
             Row::new(vec![
                 Cell::from(repo_text).style(Style::default().fg(Color::Green)),
@@ -1544,6 +1515,52 @@ mod tests {
             rex_pane: None,
             lease: None,
         }
+    }
+
+    #[test]
+    fn workspace_display_name_suffixes() {
+        let mut entry = make_entry("feature", None, 0, 0);
+        assert_eq!(entry_display_name(&entry), "feature");
+        entry.is_stale = true;
+        assert_eq!(entry_display_name(&entry), "feature [stale]");
+        entry.is_main = true;
+        assert_eq!(entry_display_name(&entry), "feature (main)");
+    }
+
+    #[test]
+    fn changes_cell_formats_and_colors_diffs() {
+        let clean = DiffStat::default();
+        assert_eq!(format_changes_text(&clean), "clean");
+        assert_eq!(changes_color(&clean, false), Color::DarkGray);
+
+        let mut entry = make_entry("feature", None, 0, 0);
+        assert_eq!(format_changes_text(&entry.diff_stat), "1 files");
+        entry.diff_stat.insertions = 2;
+        entry.diff_stat.deletions = 3;
+        assert_eq!(format_changes_text(&entry.diff_stat), "+2 -3");
+        assert_eq!(changes_color(&entry.diff_stat, false), Color::Red);
+        assert_eq!(changes_color(&entry.diff_stat, true), Color::DarkGray);
+
+        entry.diff_stat.deletions = 0;
+        assert_eq!(format_changes_text(&entry.diff_stat), "+2");
+        assert_eq!(changes_color(&entry.diff_stat, false), Color::Green);
+    }
+
+    #[test]
+    fn agent_cell_uses_most_urgent_status_unless_dimmed() {
+        let mut entry = make_entry("feature", None, 0, 0);
+        assert_eq!(agent_cell(&entry, false), (String::new(), Color::DarkGray));
+        let summary = AgentSummary {
+            waiting: 1,
+            working: 1,
+            done: 0,
+            idle: 0,
+            notes: Vec::new(),
+        };
+        let label = summary.to_string();
+        entry.agent_status = Some(summary);
+        assert_eq!(agent_cell(&entry, false), (label.clone(), Color::Yellow));
+        assert_eq!(agent_cell(&entry, true), (label, Color::DarkGray));
     }
 
     #[test]
