@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::names::WorkspaceName;
 use crate::rex::{self, RexApi, Shown};
 use crate::{agent, hooks, names, pool, vcs};
 
@@ -120,22 +121,19 @@ fn is_vcs_root(dir: &Path) -> bool {
     dir.join(".jj").is_dir() || dir.join(".git").exists()
 }
 
-/// Reject workspace names that would break path construction. We allow leading
-/// dots (with this layout, `.foo` is just a directory name inside
-/// `<repo>.dwm/worktrees/` — no collision with `agent-status/` or other internal
-/// dirs), but `.`, `..`, and names with path separators are still nonsense.
-fn validate_workspace_name(name: &str) -> Result<()> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-        bail!("invalid workspace name '{}'", name);
-    }
-    Ok(())
+fn workspace_path(worktrees: &Path, name: &WorkspaceName) -> PathBuf {
+    worktrees.join(name)
+}
+
+fn workspace_entry_name(entry: &fs::DirEntry) -> Option<WorkspaceName> {
+    WorkspaceName::try_from(entry.file_name().into_string().ok()?).ok()
 }
 
 /// Walk up from `cwd` looking for `<repo_parent>/<repo_name>.dwm/worktrees/<workspace>/`.
 ///
 /// Returns `Some((repo_root, workspace_name, workspace_path))` when the cwd
 /// is inside a dwm-managed workspace, or `None` otherwise.
-pub fn find_dwm_workspace(cwd: &Path) -> Option<(PathBuf, String, PathBuf)> {
+pub fn find_dwm_workspace(cwd: &Path) -> Option<(PathBuf, WorkspaceName, PathBuf)> {
     // Walk from cwd upwards and check each ancestor.
     let mut current = cwd.to_path_buf();
     loop {
@@ -148,10 +146,7 @@ pub fn find_dwm_workspace(cwd: &Path) -> Option<(PathBuf, String, PathBuf)> {
             && let Some(root) = repo_root_for_dwm_dir(dwm)
             && is_vcs_root(&root)
         {
-            let ws_name = current
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let ws_name = WorkspaceName::parse(current.file_name()?.to_str()?).ok()?;
             return Some((root, ws_name, current));
         }
         if !current.pop() {
@@ -333,7 +328,7 @@ pub fn new_workspace(
 /// What [`new_workspace_inner`] made.
 #[derive(Debug)]
 struct NewOutcome {
-    name: String,
+    name: WorkspaceName,
     /// Where the shell should `cd`, unless Rex showed a session instead.
     cd: Option<PathBuf>,
 }
@@ -355,6 +350,19 @@ fn new_workspace_inner(
             "running a command in the new workspace needs a Rex session; run dwm inside Rex without --here"
         );
     }
+    let name = name.map(WorkspaceName::try_from).transpose()?;
+    let from = from.map(WorkspaceName::parse).transpose()?;
+    create_workspace(deps, name, at, from.as_ref(), placement, command)
+}
+
+fn create_workspace(
+    deps: &WorkspaceDeps,
+    name: Option<WorkspaceName>,
+    at: Option<&str>,
+    from: Option<&WorkspaceName>,
+    placement: Placement,
+    command: &[String],
+) -> Result<NewOutcome> {
     let root = resolve_repo_root(deps)?;
     let worktrees = worktrees_dir(&root);
     fs::create_dir_all(&worktrees)?;
@@ -368,25 +376,22 @@ fn new_workspace_inner(
         let workspaces = deps.backend.workspace_list(&root)?;
         let (_name, info) = workspaces
             .iter()
-            .find(|(n, _)| n == ws_name)
+            .find(|(n, _)| n == ws_name.as_str())
             .with_context(|| format!("workspace '{}' not found", ws_name))?;
         resolved_at = deps
             .backend
-            .workspace_start_revision(&root, ws_name, info)?;
+            .workspace_start_revision(&root, ws_name.as_str(), info)?;
         Some(resolved_at.as_str())
     } else {
         at
     };
 
     let ws_name = match name {
-        Some(n) => {
-            validate_workspace_name(&n)?;
-            n
-        }
-        None => names::generate_unique(&worktrees),
+        Some(name) => name,
+        None => WorkspaceName::try_from(names::generate_unique(&worktrees))?,
     };
 
-    let ws_path = worktrees.join(&ws_name);
+    let ws_path = workspace_path(&worktrees, &ws_name);
     if ws_path.exists() {
         bail!(
             "workspace '{}' already exists at {}",
@@ -407,7 +412,9 @@ fn new_workspace_inner(
         );
     }
     let source = match from {
-        Some(name) if name != deps.backend.main_workspace_name() => worktrees.join(name),
+        Some(name) if name.as_str() != deps.backend.main_workspace_name() => {
+            workspace_path(&worktrees, name)
+        }
         _ => root.clone(),
     };
     let resolved = at
@@ -419,7 +426,7 @@ fn new_workspace_inner(
     deps.backend.workspace_add_configured(
         &root,
         &ws_path,
-        &ws_name,
+        ws_name.as_str(),
         resolved.as_deref(),
         &source,
         &config.workspace,
@@ -430,7 +437,7 @@ fn new_workspace_inner(
         // blocks retrying under the same name.
         let cleanup = deps
             .backend
-            .discard_new_workspace(&root, &ws_name, &ws_path)
+            .discard_new_workspace(&root, ws_name.as_str(), &ws_path)
             .and_then(|()| {
                 if ws_path.exists() {
                     fs::remove_dir_all(&ws_path)?;
@@ -456,14 +463,20 @@ fn new_workspace_inner(
 
     let hook_ctx = hooks::HookContext {
         workspace_path: ws_path.clone(),
-        workspace_name: ws_name.clone(),
+        workspace_name: ws_name.to_string(),
         repo_root: root.clone(),
         vcs_type: deps.backend.vcs_type(),
         from_workspace: from.map(|s| s.to_string()),
     };
     hooks::run_setup(&config.scripts, &hook_ctx)?;
 
-    let cd = open_new_workspace(deps.rex.as_deref(), &ws_name, &ws_path, placement, command)?;
+    let cd = open_new_workspace(
+        deps.rex.as_deref(),
+        ws_name.as_str(),
+        &ws_path,
+        placement,
+        command,
+    )?;
     Ok(NewOutcome { name: ws_name, cd })
 }
 
@@ -538,7 +551,7 @@ fn warn_not_shown(reason: &str) {
 /// repo directory's name for the main workspace.
 fn session_label_for(path: &Path) -> String {
     if let Some((_, name, _)) = find_dwm_workspace(path) {
-        return name;
+        return name.to_string();
     }
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -647,7 +660,7 @@ fn lease_workspace_inner(
     pool_name: &str,
     at: Option<&str>,
 ) -> Result<PathBuf> {
-    validate_workspace_name(pool_name)?;
+    let pool_name = WorkspaceName::parse(pool_name)?;
     let root = resolve_repo_root(deps)?;
     let dwm = dwm_dir(&root);
     let worktrees = worktrees_dir(&root);
@@ -665,14 +678,16 @@ fn lease_workspace_inner(
     let mut names = Vec::new();
     for entry in fs::read_dir(&worktrees)? {
         let entry = entry?;
-        if entry.path().is_dir() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
+        if entry.path().is_dir()
+            && let Some(name) = workspace_entry_name(&entry)
+        {
+            names.push(name);
         }
     }
-    let members = pool::members(pool_name, names.iter().map(String::as_str));
+    let members = pool::members(&pool_name, names);
 
     for (_, name) in &members {
-        let ws_path = worktrees.join(name);
+        let ws_path = workspace_path(&worktrees, name);
         let busy = if let Some(lease) = pool::read_lease(&dwm, name)
             && pool::lease_state(&lease, panes.as_deref()) == pool::LeaseState::Held
         {
@@ -682,7 +697,7 @@ fn lease_workspace_inner(
         {
             Some(format!("open in Rex {}", pane.describe()))
         } else {
-            match deps.backend.prune_verdict(&root, &ws_path, name) {
+            match deps.backend.prune_verdict(&root, &ws_path, name.as_str()) {
                 vcs::PruneVerdict::Prunable => None,
                 vcs::PruneVerdict::Keep(reason) => Some(reason),
             }
@@ -692,15 +707,15 @@ fn lease_workspace_inner(
             continue;
         }
         deps.backend
-            .reset_workspace(&root, &ws_path, name, &revision)
+            .reset_workspace(&root, &ws_path, name.as_str(), &revision)
             .with_context(|| format!("resetting '{name}' to {revision}"))?;
         pool::write_lease(&dwm, &pool::Lease::new(name, holder))?;
         eprintln!("{} leased '{}' at {}", "✓".green(), name.bold(), revision);
         return Ok(ws_path);
     }
 
-    let name = pool::next_member_name(pool_name, &members);
-    let created = new_workspace_inner(
+    let name = pool::next_member_name(&pool_name, &members)?;
+    let created = create_workspace(
         deps,
         Some(name),
         Some(&revision),
@@ -714,7 +729,7 @@ fn lease_workspace_inner(
         "✓".green(),
         created.name.bold()
     );
-    Ok(worktrees.join(&created.name))
+    Ok(workspace_path(&worktrees, &created.name))
 }
 
 /// End the lease on a pool workspace, named or inferred from the current
@@ -732,7 +747,7 @@ pub fn release_workspace(name: Option<String>) -> Result<()> {
 
 fn release_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result<()> {
     let (root, name) = match name {
-        Some(n) => (resolve_repo_root(deps)?, n),
+        Some(n) => (resolve_repo_root(deps)?, WorkspaceName::try_from(n)?),
         None => {
             let (root, ws, _) = find_dwm_workspace(&deps.cwd)
                 .context("not inside a dwm workspace; provide a workspace name")?;
@@ -740,7 +755,6 @@ fn release_workspace_inner(deps: &WorkspaceDeps, name: Option<String>) -> Result
         }
     };
     // The name becomes a file path under leases/.
-    validate_workspace_name(&name)?;
     let dwm = dwm_dir(&root);
     let _lock = pool::lock(&dwm)?;
     if pool::remove_lease(&dwm, &name)? {
@@ -797,7 +811,7 @@ fn delete_workspace_inner(
     let (root, ws_name) = match name {
         Some(n) => {
             let root = resolve_repo_root(deps)?;
-            (root, n)
+            (root, WorkspaceName::try_from(n)?)
         }
         None => {
             let (root, ws, _) = find_dwm_workspace(&deps.cwd)
@@ -806,13 +820,23 @@ fn delete_workspace_inner(
         }
     };
 
-    let ws_path = worktrees_dir(&root).join(&ws_name);
+    delete_named_workspace(deps, &root, &ws_name, verbose, open_panes)
+}
+
+fn delete_named_workspace(
+    deps: &WorkspaceDeps,
+    root: &Path,
+    ws_name: &WorkspaceName,
+    verbose: bool,
+    open_panes: OpenPanes,
+) -> Result<Option<PathBuf>> {
+    let ws_path = workspace_path(&worktrees_dir(root), ws_name);
     if !ws_path.exists() {
         bail!("workspace '{}' not found at {}", ws_name, ws_path.display());
     }
 
     if let Some(rex) = deps.rex.as_deref() {
-        deal_with_open_panes(rex, &ws_name, &ws_path, open_panes)?;
+        deal_with_open_panes(rex, ws_name.as_str(), &ws_path, open_panes)?;
     }
 
     if verbose {
@@ -822,7 +846,8 @@ fn delete_workspace_inner(
             ws_name.bold()
         );
     }
-    deps.backend.workspace_remove(&root, &ws_name, &ws_path)?;
+    deps.backend
+        .workspace_remove(root, ws_name.as_str(), &ws_path)?;
 
     if ws_path.exists() {
         if verbose {
@@ -832,15 +857,15 @@ fn delete_workspace_inner(
     }
 
     // Clean up agent status files for this workspace
-    agent::remove_agent_statuses_for_workspace(&dwm_dir(&root), &ws_name);
-    let _ = pool::remove_lease(&dwm_dir(&root), &ws_name);
+    agent::remove_agent_statuses_for_workspace(&dwm_dir(root), ws_name.as_str());
+    let _ = pool::remove_lease(&dwm_dir(root), ws_name);
 
     if verbose {
         eprintln!("{} workspace '{}' deleted", "✓".green(), ws_name.bold());
     }
 
     if is_inside(&deps.cwd, &ws_path) {
-        Ok(Some(root))
+        Ok(Some(root.to_path_buf()))
     } else {
         Ok(None)
     }
@@ -929,7 +954,7 @@ fn open_panes_verdict(
 /// Why prune must keep a leased pool workspace, if it is leased.
 fn leased_verdict(
     dwm: &Path,
-    ws_name: &str,
+    ws_name: &WorkspaceName,
     panes: Option<&[rex::Pane]>,
 ) -> Option<vcs::PruneVerdict> {
     let lease = pool::read_lease(dwm, ws_name)?;
@@ -987,17 +1012,19 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
     let worktrees = worktrees_dir(&root);
     let main_ws_name = deps.backend.main_workspace_name();
 
-    let mut names: Vec<String> = Vec::new();
+    let mut names = Vec::new();
     if worktrees.exists() {
         for entry in fs::read_dir(&worktrees)? {
             let entry = entry?;
             if !entry.path().is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(name) = workspace_entry_name(&entry) else {
+                continue;
+            };
             // The main workspace lives at the repo root, never under
             // worktrees/, but guard against a directory that shares its name.
-            if name != main_ws_name {
+            if name.as_str() != main_ws_name {
                 names.push(name);
             }
         }
@@ -1017,7 +1044,7 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
 
     let mut failures = 0;
     for name in names {
-        let ws_path = worktrees.join(&name);
+        let ws_path = workspace_path(&worktrees, &name);
         // Check immediately before deleting so the verdict is as fresh as
         // possible when acting on it.
         let verdict = leased_verdict(&dwm_dir(&root), &name, panes.as_deref())
@@ -1026,7 +1053,7 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
                     .as_deref()
                     .and_then(|p| open_panes_verdict(p, &ws_path, current_block))
             })
-            .unwrap_or_else(|| deps.backend.prune_verdict(&root, &ws_path, &name));
+            .unwrap_or_else(|| deps.backend.prune_verdict(&root, &ws_path, name.as_str()));
         match &verdict {
             vcs::PruneVerdict::Keep(reason) => {
                 eprintln!("{} {}: {}", "keep ".yellow(), name.bold(), reason);
@@ -1034,16 +1061,11 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
             vcs::PruneVerdict::Prunable => match mode {
                 PruneMode::DryRun => eprintln!("{} {}", "prune".green(), name.bold()),
                 PruneMode::Delete => {
-                    match delete_workspace_inner(
-                        deps,
-                        Some(name.clone()),
-                        DeleteOutput::Quiet,
-                        OpenPanes::Refuse,
-                    ) {
+                    match delete_named_workspace(deps, &root, &name, false, OpenPanes::Refuse) {
                         Ok(redirect) => {
                             eprintln!("{} {} deleted", "✓".green(), name.bold());
                             outcome.redirect = outcome.redirect.or(redirect);
-                            outcome.deleted.push(name.clone());
+                            outcome.deleted.push(name.to_string());
                         }
                         Err(e) => {
                             failures += 1;
@@ -1053,7 +1075,7 @@ fn prune_workspaces_inner(deps: &WorkspaceDeps, mode: PruneMode) -> Result<Prune
                 }
             },
         }
-        outcome.verdicts.push((name, verdict));
+        outcome.verdicts.push((name.to_string(), verdict));
     }
 
     let prunable = outcome
@@ -1101,7 +1123,8 @@ fn switch_workspace_inner(deps: &WorkspaceDeps, name: &str) -> Result<PathBuf> {
         return Ok(root);
     }
 
-    let ws_path = worktrees_dir(&root).join(name);
+    let name = WorkspaceName::parse(name)?;
+    let ws_path = workspace_path(&worktrees_dir(&root), &name);
     if !ws_path.exists() {
         bail!("workspace '{}' not found at {}", name, ws_path.display());
     }
@@ -1138,7 +1161,7 @@ pub fn rename_workspace(name: String, new_name: Option<String>) -> Result<()> {
 /// Infer the current workspace name from the current directory path.
 fn infer_workspace_name_from_cwd(deps: &WorkspaceDeps) -> Result<String> {
     match find_dwm_workspace(&deps.cwd) {
-        Some((_, ws, _)) => Ok(ws),
+        Some((_, ws, _)) => Ok(ws.to_string()),
         None => bail!("not inside a dwm workspace"),
     }
 }
@@ -1155,8 +1178,10 @@ fn rename_workspace_inner(
         bail!("cannot rename the main workspace '{}'", old_name);
     }
 
+    let old_name = WorkspaceName::parse(old_name)?;
+    let new_name = WorkspaceName::parse(new_name)?;
     let worktrees = worktrees_dir(&root);
-    let old_path = worktrees.join(old_name);
+    let old_path = workspace_path(&worktrees, &old_name);
     if !old_path.exists() {
         bail!(
             "workspace '{}' not found at {}",
@@ -1165,9 +1190,7 @@ fn rename_workspace_inner(
         );
     }
 
-    validate_workspace_name(new_name)?;
-
-    let new_path = worktrees.join(new_name);
+    let new_path = workspace_path(&worktrees, &new_name);
     if new_path.exists() {
         bail!(
             "workspace '{}' already exists at {}",
@@ -1190,8 +1213,13 @@ fn rename_workspace_inner(
         old_name.bold(),
         new_name.bold()
     );
-    deps.backend
-        .workspace_rename(&root, &old_path, &new_path, old_name, new_name)?;
+    deps.backend.workspace_rename(
+        &root,
+        &old_path,
+        &new_path,
+        old_name.as_str(),
+        new_name.as_str(),
+    )?;
 
     eprintln!(
         "{} workspace '{}' renamed to '{}'",
@@ -1200,10 +1228,16 @@ fn rename_workspace_inner(
         new_name.bold()
     );
 
-    pool::rename_lease(&dwm_dir(&root), old_name, new_name)?;
+    pool::rename_lease(&dwm_dir(&root), &old_name, &new_name)?;
 
     if let Some(rex) = deps.rex.as_deref() {
-        follow_rename_in_rex(rex, &panes_in_old, old_name, new_name, &new_path);
+        follow_rename_in_rex(
+            rex,
+            &panes_in_old,
+            old_name.as_str(),
+            new_name.as_str(),
+            &new_path,
+        );
     }
 
     if is_inside(&deps.cwd, &old_path) {
@@ -1300,7 +1334,7 @@ pub fn list_workspace_entries_and_dwm_dir() -> Result<(Vec<WorkspaceEntry>, Path
 
 /// Inputs for the per-workspace fan-out in [`list_workspace_entries_inner`].
 struct EntryCandidate {
-    name: String,
+    name: WorkspaceName,
     path: PathBuf,
     is_main: bool,
     info: vcs::WorkspaceInfo,
@@ -1346,7 +1380,7 @@ fn list_entries_with_panes(
         .find(|(n, _)| n == main_ws_name)
         .map(|(_, info)| info.clone());
     candidates.push(EntryCandidate {
-        name: main_ws_name.to_string(),
+        name: WorkspaceName::parse(main_ws_name)?,
         path: main_repo.clone(),
         is_main: true,
         has_info: main_info.is_some(),
@@ -1364,10 +1398,12 @@ fn list_entries_with_panes(
             if !path.is_dir() {
                 continue;
             }
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let Some(name) = workspace_entry_name(&entry) else {
+                continue;
+            };
             let info = vcs_workspaces
                 .iter()
-                .find(|(n, _)| *n == name)
+                .find(|(n, _)| n == name.as_str())
                 .map(|(_, info)| info.clone());
             candidates.push(EntryCandidate {
                 name,
@@ -1394,14 +1430,14 @@ fn list_entries_with_panes(
 
                     let diff_stat = if c.is_main || c.has_info {
                         backend
-                            .diff_stat_vs_trunk(main_repo_ref, &c.path, &c.name)
+                            .diff_stat_vs_trunk(main_repo_ref, &c.path, c.name.as_str())
                             .unwrap_or_default()
                     } else {
                         vcs::DiffStat::default()
                     };
 
                     let description = if c.info.description.trim().is_empty() {
-                        backend.latest_description(main_repo_ref, &c.path, &c.name)
+                        backend.latest_description(main_repo_ref, &c.path, c.name.as_str())
                     } else {
                         c.info.description.clone()
                     };
@@ -1414,7 +1450,7 @@ fn list_entries_with_panes(
                         true
                     } else {
                         let merge_status = if c.has_info
-                            && backend.is_merged_into_trunk(main_repo_ref, &c.path, &c.name)
+                            && backend.is_merged_into_trunk(main_repo_ref, &c.path, c.name.as_str())
                         {
                             MergeStatus::Merged
                         } else {
@@ -1437,14 +1473,14 @@ fn list_entries_with_panes(
 
     let mut entries = Vec::with_capacity(candidates.len());
     for (c, comp) in candidates.into_iter().zip(computed) {
-        let agent_status = agent_summaries.remove(&c.name);
+        let agent_status = agent_summaries.remove(c.name.as_str());
         let lease = pool::read_lease(&dwm, &c.name)
             .filter(|l| pool::lease_state(l, panes) == pool::LeaseState::Held);
         let rex_pane = panes.and_then(|p| {
             rex::pick_pane(&rex::panes_inside(p, &c.path, None)).map(rex::PaneRef::from)
         });
         entries.push(WorkspaceEntry {
-            name: c.name,
+            name: c.name.to_string(),
             path: c.path,
             last_modified: comp.modified,
             diff_stat: comp.diff_stat,
@@ -1880,7 +1916,7 @@ mod tests {
 
         let (root, name, path) = find_dwm_workspace(&ws).unwrap();
         assert_eq!(root, repo);
-        assert_eq!(name, "feature");
+        assert_eq!(name.as_str(), "feature");
         assert_eq!(path, ws);
     }
 
@@ -1894,7 +1930,7 @@ mod tests {
 
         let (root, name, path) = find_dwm_workspace(&sub).unwrap();
         assert_eq!(root, repo);
-        assert_eq!(name, "feat-x");
+        assert_eq!(name.as_str(), "feat-x");
         assert_eq!(path, ws);
     }
 
@@ -1937,7 +1973,7 @@ mod tests {
 
         let (root, name, _) = find_dwm_workspace(&ws).unwrap();
         assert_eq!(root, repo);
-        assert_eq!(name, ".hidden-feature");
+        assert_eq!(name.as_str(), ".hidden-feature");
     }
 
     #[test]
@@ -3163,6 +3199,37 @@ mod tests {
             "error: {}",
             err
         );
+    }
+
+    #[test]
+    fn workspace_commands_reject_non_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_repo = make_repo_with_vcs(tmp.path());
+        fs::create_dir_all(worktrees_dir(&main_repo)).unwrap();
+        let (mock, _calls) = MockBackend::new(main_repo.clone(), vec![]);
+        let deps = WorkspaceDeps {
+            backend: Box::new(mock),
+            cwd: main_repo,
+            rex: None,
+        };
+
+        let errors = [
+            switch_workspace_inner(&deps, ".").unwrap_err(),
+            delete_workspace_inner(
+                &deps,
+                Some(".".into()),
+                DeleteOutput::Quiet,
+                OpenPanes::Refuse,
+            )
+            .unwrap_err(),
+            rename_workspace_inner(&deps, ".", "new-name").unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                error.to_string().contains("invalid workspace name"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]
@@ -4890,6 +4957,10 @@ mod tests {
     // ── Rex integration ──────────────────────────────────────────────
 
     mod rex_integration {
+        fn ws_name(name: &str) -> WorkspaceName {
+            WorkspaceName::parse(name).unwrap()
+        }
+
         use super::*;
         use crate::rex::ProgramState::{Blocked, Idle, Working};
         use crate::rex::tests::{FakeRex, pane};
@@ -5061,7 +5132,7 @@ mod tests {
                 new_workspace_inner(&deps, Some("c".into()), None, None, Placement::Rex, &[])
                     .unwrap()
             });
-            assert_eq!(created.name, "c");
+            assert_eq!(created.name.as_str(), "c");
             assert_eq!(created.cd, None);
             let opened = fake.opened.borrow();
             assert_eq!(opened[0].label, "c");
@@ -5325,7 +5396,7 @@ mod tests {
                 }
                 other => panic!("expected one Add, got {other:?}"),
             }
-            let lease = pool::read_lease(&dwm_dir(&main_repo), "agents-1").unwrap();
+            let lease = pool::read_lease(&dwm_dir(&main_repo), &ws_name("agents-1")).unwrap();
             assert_eq!(lease.rex_block.as_deref(), Some("block:me"));
         }
 
@@ -5349,7 +5420,7 @@ mod tests {
                 }
                 other => panic!("expected one Reset, got {other:?}"),
             }
-            assert!(pool::read_lease(&dwm_dir(&main_repo), "agents-1").is_some());
+            assert!(pool::read_lease(&dwm_dir(&main_repo), &ws_name("agents-1")).is_some());
 
             // The next lease skips the member now on loan.
             let path = lease(tmp.path(), &deps, None);
@@ -5376,7 +5447,7 @@ mod tests {
             );
             pool::write_lease(
                 &dwm_dir(&main_repo),
-                &pool::Lease::new("agents-1", Some("block:other")),
+                &pool::Lease::new(&ws_name("agents-1"), Some("block:other")),
             )
             .unwrap();
 
@@ -5398,10 +5469,14 @@ mod tests {
                 &[("agents-1", vcs::PruneVerdict::Prunable)],
             );
             let dwm = dwm_dir(&main_repo);
-            pool::write_lease(&dwm, &pool::Lease::new("agents-1", Some("block:gone"))).unwrap();
+            pool::write_lease(
+                &dwm,
+                &pool::Lease::new(&ws_name("agents-1"), Some("block:gone")),
+            )
+            .unwrap();
 
             assert_eq!(lease(tmp.path(), &deps, None), ws(&main_repo, "agents-1"));
-            let lease = pool::read_lease(&dwm, "agents-1").unwrap();
+            let lease = pool::read_lease(&dwm, &ws_name("agents-1")).unwrap();
             assert_eq!(
                 lease.rex_block.as_deref(),
                 Some("block:me"),
@@ -5426,11 +5501,11 @@ mod tests {
                 &[("agents-1", vcs::PruneVerdict::Prunable)],
             );
             let dwm = dwm_dir(&main_repo);
-            pool::write_lease(&dwm, &pool::Lease::new("agents-1", None)).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new(&ws_name("agents-1"), None)).unwrap();
 
             deps.cwd = ws(&main_repo, "agents-1");
             release_workspace_inner(&deps, None).unwrap();
-            assert!(pool::read_lease(&dwm, "agents-1").is_none());
+            assert!(pool::read_lease(&dwm, &ws_name("agents-1")).is_none());
             // Releasing again is harmless.
             release_workspace_inner(&deps, Some("agents-1".into())).unwrap();
         }
@@ -5462,7 +5537,11 @@ mod tests {
                     ("agents-2", vcs::PruneVerdict::Prunable),
                 ],
             );
-            pool::write_lease(&dwm_dir(&main_repo), &pool::Lease::new("agents-1", None)).unwrap();
+            pool::write_lease(
+                &dwm_dir(&main_repo),
+                &pool::Lease::new(&ws_name("agents-1"), None),
+            )
+            .unwrap();
 
             let outcome = prune_workspaces_inner(&deps, PruneMode::Delete).unwrap();
             assert_eq!(outcome.deleted, vec!["agents-2"]);
@@ -5490,9 +5569,17 @@ mod tests {
                 ],
             );
             let dwm = dwm_dir(&main_repo);
-            pool::write_lease(&dwm, &pool::Lease::new("agents-1", Some("block:gone"))).unwrap();
-            pool::write_lease(&dwm, &pool::Lease::new("agents-2", Some("block:alive"))).unwrap();
-            pool::write_lease(&dwm, &pool::Lease::new("agents-3", None)).unwrap();
+            pool::write_lease(
+                &dwm,
+                &pool::Lease::new(&ws_name("agents-1"), Some("block:gone")),
+            )
+            .unwrap();
+            pool::write_lease(
+                &dwm,
+                &pool::Lease::new(&ws_name("agents-2"), Some("block:alive")),
+            )
+            .unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new(&ws_name("agents-3"), None)).unwrap();
 
             let entries = list_workspace_entries_inner(&deps).unwrap();
             let json = status_json(&entries);
@@ -5522,12 +5609,12 @@ mod tests {
                 ],
             );
             let dwm = dwm_dir(&main_repo);
-            pool::write_lease(&dwm, &pool::Lease::new("agents-1", None)).unwrap();
-            pool::write_lease(&dwm, &pool::Lease::new("agents-2", None)).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new(&ws_name("agents-1"), None)).unwrap();
+            pool::write_lease(&dwm, &pool::Lease::new(&ws_name("agents-2"), None)).unwrap();
 
             rename_workspace_inner(&deps, "agents-1", "agents-7").unwrap();
-            assert!(pool::read_lease(&dwm, "agents-1").is_none());
-            assert!(pool::read_lease(&dwm, "agents-7").is_some());
+            assert!(pool::read_lease(&dwm, &ws_name("agents-1")).is_none());
+            assert!(pool::read_lease(&dwm, &ws_name("agents-7")).is_some());
 
             delete_workspace_inner(
                 &deps,
@@ -5536,7 +5623,7 @@ mod tests {
                 OpenPanes::Refuse,
             )
             .unwrap();
-            assert!(pool::read_lease(&dwm, "agents-2").is_none());
+            assert!(pool::read_lease(&dwm, &ws_name("agents-2")).is_none());
         }
     }
 }

@@ -1,7 +1,8 @@
 //! Project configuration shared by workspace provisioning and lifecycle hooks.
+use crate::fs_copy::RelativeCopyPath;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -36,7 +37,7 @@ pub enum Checkout {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
-    pub copy: Vec<PathBuf>,
+    pub copy: Vec<RelativeCopyPath>,
     pub copy_mode: CopyMode,
     pub copy_unignored: CopyUnignored,
     pub checkout: Checkout,
@@ -117,7 +118,10 @@ mod tests {
         let cfg =
             parse_toml("[workspace]\ncopy = ['target']\ncopy_mode = 'copy'\ncheckout = 'cow'")
                 .unwrap();
-        assert_eq!(cfg.workspace.copy, [PathBuf::from("target")]);
+        assert_eq!(cfg.workspace.copy[0].as_ref(), Path::new("target"));
+        for path in ["../outside", "/tmp", ".git/config"] {
+            assert!(parse_toml(&format!("[workspace]\ncopy = [{path:?}]")).is_err());
+        }
         assert_eq!(cfg.workspace.copy_mode, CopyMode::Copy);
         assert!(parse_toml("[workspace]\ncheckout = 'unknown'").is_err());
         assert_eq!(
@@ -199,8 +203,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load(dir.path()).unwrap().workspace.copy,
-            [PathBuf::from("cache")]
+            load(dir.path()).unwrap().workspace.copy[0].as_ref(),
+            Path::new("cache")
         );
     }
 }

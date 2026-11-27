@@ -1,7 +1,7 @@
 //! Plan ignored-file copies before creating a workspace; never traverse symlinks.
 use crate::{
     config::{CopyUnignored, WorkspaceConfig},
-    fs_copy,
+    fs_copy::{self, RelativeCopyPath},
     vcs::VcsType,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -23,7 +23,7 @@ pub fn output(mut command: Command) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-pub fn paths(bytes: &[u8]) -> Result<BTreeSet<PathBuf>> {
+pub fn paths(bytes: &[u8]) -> Result<BTreeSet<RelativeCopyPath>> {
     bytes
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
@@ -35,13 +35,12 @@ pub fn paths(bytes: &[u8]) -> Result<BTreeSet<PathBuf>> {
             };
             #[cfg(not(unix))]
             let path = PathBuf::from(std::str::from_utf8(p)?);
-            fs_copy::validate_relative(&path)?;
-            Ok(path)
+            RelativeCopyPath::try_from(path)
         })
         .collect()
 }
 
-pub fn tracked(root: &Path, vcs: VcsType) -> Result<BTreeSet<PathBuf>> {
+pub fn tracked(root: &Path, vcs: VcsType) -> Result<BTreeSet<RelativeCopyPath>> {
     let mut cmd = Command::new(if vcs == VcsType::Git { "git" } else { "jj" });
     cmd.current_dir(root);
     if vcs == VcsType::Git {
@@ -93,7 +92,7 @@ pub const WORKTREE_INCLUDE: &str = ".worktreeinclude";
 /// match, descending into matched directories. Whether a match is actually
 /// ignored (the convention only copies ignored files) and untracked is
 /// decided later by the same checks `workspace.copy` entries go through.
-fn worktree_include(root: &Path, vcs: VcsType) -> Result<BTreeSet<PathBuf>> {
+fn worktree_include(root: &Path, vcs: VcsType) -> Result<BTreeSet<RelativeCopyPath>> {
     let include = root.join(WORKTREE_INCLUDE);
     match fs::symlink_metadata(&include) {
         Ok(meta) if meta.is_file() => (),
@@ -111,7 +110,7 @@ fn worktree_include(root: &Path, vcs: VcsType) -> Result<BTreeSet<PathBuf>> {
 /// Like [`paths`], but silently drops entries inside VCS/dwm metadata (git
 /// walks a jj repository's `.jj/`, which a broad pattern could match) rather
 /// than failing.
-fn safe_paths(bytes: &[u8]) -> BTreeSet<PathBuf> {
+fn safe_paths(bytes: &[u8]) -> BTreeSet<RelativeCopyPath> {
     bytes
         .split(|b| *b == 0)
         .filter_map(|p| paths(p).ok())
@@ -119,14 +118,18 @@ fn safe_paths(bytes: &[u8]) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-fn ignored(root: &Path, vcs: VcsType, candidates: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>> {
+fn ignored(
+    root: &Path,
+    vcs: VcsType,
+    candidates: &BTreeSet<RelativeCopyPath>,
+) -> Result<BTreeSet<RelativeCopyPath>> {
     if candidates.is_empty() {
         return Ok(BTreeSet::new());
     }
     let mut cmd = git_command(root, vcs)?;
     let mut input = tempfile::tempfile()?;
     for path in candidates {
-        input.write_all(path.as_os_str().as_encoded_bytes())?;
+        input.write_all(path.as_ref().as_os_str().as_encoded_bytes())?;
         input.write_all(&[0])?;
     }
     use std::io::{Seek, SeekFrom};
@@ -145,8 +148,8 @@ fn ignored(root: &Path, vcs: VcsType, candidates: &BTreeSet<PathBuf>) -> Result<
 
 fn collect(
     root: &Path,
-    relative: &Path,
-    result: &mut BTreeSet<PathBuf>,
+    relative: &RelativeCopyPath,
+    result: &mut BTreeSet<RelativeCopyPath>,
     depth: usize,
 ) -> Result<()> {
     ensure!(depth < 128, "copy directory nesting exceeds 128 levels");
@@ -154,37 +157,36 @@ fn collect(
     let meta = fs::symlink_metadata(root.join(relative))?;
     if meta.is_dir() {
         for entry in fs::read_dir(root.join(relative))? {
-            let path = relative.join(entry?.file_name());
+            let path = relative.as_ref().join(entry?.file_name());
             // Never descend into internal state, including nested repositories.
-            if fs_copy::validate_relative(&path).is_ok() {
+            if let Ok(path) = RelativeCopyPath::try_from(path) {
                 collect(root, &path, result, depth + 1)?;
             }
         }
     } else if meta.is_file() || meta.is_symlink() {
-        result.insert(relative.to_path_buf());
+        result.insert(relative.clone());
     } else {
-        bail!("unsupported special file: {}", relative.display());
+        bail!("unsupported special file: {}", relative.as_ref().display());
     }
     Ok(())
 }
 
 pub struct SeedPlan {
     source: PathBuf,
-    files: BTreeSet<PathBuf>,
+    files: BTreeSet<RelativeCopyPath>,
 }
 
 impl SeedPlan {
     pub fn prepare(source: &Path, vcs: VcsType, config: &WorkspaceConfig) -> Result<Self> {
         let mut candidates = BTreeSet::new();
         for path in &config.copy {
-            fs_copy::check_parents(source, path)?;
             match collect(source, path, &mut candidates, 0) {
                 Ok(()) => (),
                 Err(e)
                     if e.downcast_ref::<io::Error>()
                         .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
                 {
-                    eprintln!("warning: copy source missing: {}", path.display());
+                    eprintln!("warning: copy source missing: {}", path.as_ref().display());
                 }
                 Err(e) => return Err(e),
             }
@@ -216,12 +218,12 @@ impl SeedPlan {
             match config.copy_unignored {
                 CopyUnignored::Skip => eprintln!(
                     "warning: not copying {}: it is not ignored at the new workspace's revision",
-                    path.display()
+                    path.as_ref().display()
                 ),
                 CopyUnignored::Error => bail!(
                     "copy path is not ignored at destination revision: {} \
                      (set workspace.copy_unignored = \"skip\" to skip such files)",
-                    path.display()
+                    path.as_ref().display()
                 ),
             }
         }
@@ -229,19 +231,19 @@ impl SeedPlan {
         for path in files.iter().copied() {
             fs_copy::check_parents(destination, path)?;
             ensure!(
-                !path.ancestors().any(|p| tracked.contains(p))
+                !path.as_ref().ancestors().any(|p| tracked.contains(p))
                     && !tracked
                         .range(path.clone()..)
                         .next()
-                        .is_some_and(|p| p.starts_with(path)),
+                        .is_some_and(|p| p.as_ref().starts_with(path)),
                 "copy conflicts with tracked destination: {}",
-                path.display()
+                path.as_ref().display()
             );
             ensure!(
                 !destination.join(path).try_exists()?
                     && fs::symlink_metadata(destination.join(path)).is_err(),
                 "copy destination already exists: {}",
-                path.display()
+                path.as_ref().display()
             );
         }
         let mut stats = fs_copy::CopyStats::default();
@@ -251,7 +253,7 @@ impl SeedPlan {
             let dest = destination.join(path);
             fs::create_dir_all(dest.parent().context("missing parent")?)?;
             fs_copy::copy_file(&self.source.join(path), &dest, config.copy_mode, &mut stats)
-                .with_context(|| format!("copying {}", path.display()))?;
+                .with_context(|| format!("copying {}", path.as_ref().display()))?;
         }
         eprintln!(
             "Copied {} files: {} cloned, {} copied ({} logical bytes)",
@@ -267,6 +269,10 @@ impl SeedPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn copy_path(path: &str) -> RelativeCopyPath {
+        RelativeCopyPath::try_from(PathBuf::from(path)).unwrap()
+    }
     fn run(root: &Path, program: &str, args: &[&str]) {
         let mut cmd = Command::new(program);
         cmd.current_dir(root).args(args);
@@ -331,10 +337,7 @@ mod tests {
             let plan = SeedPlan::prepare(&root, vcs, &config).unwrap();
             assert_eq!(
                 plan.files,
-                BTreeSet::from([
-                    PathBuf::from(".env"),
-                    PathBuf::from("node_modules/a/index.js"),
-                ]),
+                BTreeSet::from([copy_path(".env"), copy_path("node_modules/a/index.js"),]),
                 "{vcs:?}"
             );
 
@@ -391,7 +394,7 @@ mod tests {
             let plan = SeedPlan::prepare(&root, vcs, &skip).unwrap();
             assert_eq!(
                 plan.files,
-                BTreeSet::from([PathBuf::from(".env"), PathBuf::from("cache/blob")]),
+                BTreeSet::from([copy_path(".env"), copy_path("cache/blob")]),
                 "{vcs:?}"
             );
 
@@ -432,13 +435,13 @@ mod tests {
         write(&root, ".env", "secret");
         write(&root, "target/debug/app", "bin");
         let config = WorkspaceConfig {
-            copy: vec!["target".into(), ".env".into()],
+            copy: vec![copy_path("target"), copy_path(".env")],
             ..Default::default()
         };
         let plan = SeedPlan::prepare(&root, VcsType::Git, &config).unwrap();
         assert_eq!(
             plan.files,
-            BTreeSet::from([PathBuf::from(".env"), PathBuf::from("target/debug/app")])
+            BTreeSet::from([copy_path(".env"), copy_path("target/debug/app")])
         );
     }
 
@@ -464,14 +467,14 @@ mod tests {
         write(root, WORKTREE_INCLUDE, "*\n");
         write(root, "build.log", "log");
         let plan = SeedPlan::prepare(root, VcsType::Jj, &WorkspaceConfig::default()).unwrap();
-        assert_eq!(plan.files, BTreeSet::from([PathBuf::from("build.log")]));
+        assert_eq!(plan.files, BTreeSet::from([copy_path("build.log")]));
     }
 
     #[test]
     fn safe_paths_drops_metadata_entries() {
         assert_eq!(
             safe_paths(b".jj/repo/store\0.env\0sub/.git/HEAD\0\0a/b\0"),
-            BTreeSet::from([PathBuf::from(".env"), PathBuf::from("a/b")])
+            BTreeSet::from([copy_path(".env"), copy_path("a/b")])
         );
     }
 
@@ -500,14 +503,11 @@ mod tests {
             }
             fs::write(root.join("artifacts/cache"), "cached").unwrap();
             let config = WorkspaceConfig {
-                copy: vec!["artifacts".into()],
+                copy: vec![copy_path("artifacts")],
                 ..Default::default()
             };
             let plan = SeedPlan::prepare(&root, vcs, &config).unwrap();
-            assert_eq!(
-                plan.files,
-                BTreeSet::from([PathBuf::from("artifacts/cache")])
-            );
+            assert_eq!(plan.files, BTreeSet::from([copy_path("artifacts/cache")]));
             let dest = dir.path().join("dest");
             let backend = vcs.to_backend();
             backend

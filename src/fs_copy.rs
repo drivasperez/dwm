@@ -1,8 +1,9 @@
 //! Native, independently writable file clones. Never fall back to hard links.
 use crate::config::CopyMode;
 use std::{
+    borrow::Borrow,
     fs, io,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(Debug, Default)]
@@ -12,25 +13,49 @@ pub struct CopyStats {
     pub bytes: u64,
 }
 
-pub fn validate_relative(path: &Path) -> anyhow::Result<()> {
-    anyhow::ensure!(!path.as_os_str().is_empty(), "empty copy path");
-    for part in path.components() {
-        match part {
-            Component::Normal(name)
-                if ![".git", ".jj", ".dwm"]
-                    .iter()
-                    .any(|n| name.eq_ignore_ascii_case(n)) => {}
-            _ => anyhow::bail!("unsafe workspace path: {}", path.display()),
+/// A relative copy path that cannot name VCS or dwm metadata.
+/// This is a lexical guarantee only; check ancestors against the filesystem
+/// before using it under a particular root.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+#[serde(try_from = "PathBuf")]
+pub struct RelativeCopyPath(PathBuf);
+
+impl TryFrom<PathBuf> for RelativeCopyPath {
+    type Error = anyhow::Error;
+
+    fn try_from(path: PathBuf) -> anyhow::Result<Self> {
+        anyhow::ensure!(!path.as_os_str().is_empty(), "empty copy path");
+        for part in path.components() {
+            match part {
+                Component::Normal(name)
+                    if !name.as_encoded_bytes().contains(&0)
+                        && ![".git", ".jj", ".dwm"]
+                            .iter()
+                            .any(|n| name.eq_ignore_ascii_case(n)) => {}
+                _ => anyhow::bail!("unsafe workspace path: {}", path.display()),
+            }
         }
+        Ok(Self(path))
     }
-    Ok(())
+}
+
+impl AsRef<Path> for RelativeCopyPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+// PathBuf and Path use the same component-based ordering.
+impl Borrow<Path> for RelativeCopyPath {
+    fn borrow(&self) -> &Path {
+        self.as_ref()
+    }
 }
 
 /// Reject symlinked ancestors; the leaf itself may be a symlink.
-pub fn check_parents(root: &Path, relative: &Path) -> anyhow::Result<()> {
-    validate_relative(relative)?;
+pub fn check_parents(root: &Path, relative: &RelativeCopyPath) -> anyhow::Result<()> {
     let mut current = root.to_path_buf();
-    if let Some(parent) = relative.parent() {
+    if let Some(parent) = relative.as_ref().parent() {
         for part in parent.components() {
             current.push(part);
             match fs::symlink_metadata(&current) {
@@ -221,7 +246,10 @@ mod tests {
     #[test]
     fn unsafe_paths_and_error_classification() {
         for path in ["", "/tmp", "../foo", ".git/config", "x/.dwm/y", ".JJ/repo"] {
-            assert!(validate_relative(Path::new(path)).is_err(), "{path}");
+            assert!(
+                RelativeCopyPath::try_from(PathBuf::from(path)).is_err(),
+                "{path}"
+            );
         }
         assert!(!unsupported(&io::Error::from_raw_os_error(libc::EACCES)));
         assert!(!unsupported(&io::Error::from_raw_os_error(libc::ENOSPC)));
@@ -253,6 +281,7 @@ mod tests {
             fs::read_link(dir.path().join("link-copy")).unwrap(),
             Path::new("missing")
         );
-        assert!(check_parents(dir.path(), Path::new("link/file")).is_err());
+        let relative = RelativeCopyPath::try_from(PathBuf::from("link/file")).unwrap();
+        assert!(check_parents(dir.path(), &relative).is_err());
     }
 }
