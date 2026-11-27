@@ -78,15 +78,35 @@ pub fn generate_name() -> String {
     format!("{adj}-{noun}")
 }
 
+/// Random picks to try before searching the space in order.
+const RANDOM_ATTEMPTS: usize = 64;
+
 /// Generate a random `adjective-noun` name that does not already exist as a
 /// subdirectory of `dir`.
+///
+/// Always terminates: after a few random picks it walks every combination,
+/// and once all of them are taken it adds a numeric suffix.
 pub fn generate_unique(dir: &Path) -> String {
-    loop {
+    let free = |name: &str| !dir.join(name).exists();
+    for _ in 0..RANDOM_ATTEMPTS {
         let name = generate_name();
-        if !dir.join(&name).exists() {
+        if free(&name) {
             return name;
         }
     }
+    for adj in ADJECTIVES {
+        for noun in NOUNS {
+            let name = format!("{adj}-{noun}");
+            if free(&name) {
+                return name;
+            }
+        }
+    }
+    let base = generate_name();
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|name| free(name))
+        .expect("an unbounded range of suffixes always has a free one")
 }
 
 #[cfg(test)]
@@ -123,5 +143,36 @@ mod tests {
             std::fs::create_dir(dir.path().join(&name)).unwrap();
             assert!(names.insert(name));
         }
+    }
+
+    #[test]
+    fn generate_unique_terminates_when_every_combination_is_taken() {
+        // Regression: this looped forever once all 2,500 names existed.
+        let tmp = tempfile::tempdir().unwrap();
+        for adj in ADJECTIVES {
+            for noun in NOUNS {
+                std::fs::create_dir(tmp.path().join(format!("{adj}-{noun}"))).unwrap();
+            }
+        }
+        let name = generate_unique(tmp.path());
+        assert!(!tmp.path().join(&name).exists(), "{name} is taken");
+        let (base, suffix) = name.rsplit_once('-').unwrap();
+        assert!(suffix.parse::<u32>().unwrap() >= 2, "{name}");
+        assert!(tmp.path().join(base).exists(), "suffixed onto a real name");
+    }
+
+    #[test]
+    fn generate_unique_finds_the_last_free_combination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let last_free = format!("{}-{}", ADJECTIVES[7], NOUNS[13]);
+        for adj in ADJECTIVES {
+            for noun in NOUNS {
+                let name = format!("{adj}-{noun}");
+                if name != last_free {
+                    std::fs::create_dir(tmp.path().join(name)).unwrap();
+                }
+            }
+        }
+        assert_eq!(generate_unique(tmp.path()), last_free);
     }
 }

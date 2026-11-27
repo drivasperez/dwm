@@ -181,25 +181,48 @@ fn register_repo(repo_root: &Path) -> Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    // Read existing entries (if any) so we can dedupe.
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let _lock = lock_registry(&path)?;
+    let existing = read_registry(&path)?;
     if existing.lines().any(|l| l.trim() == canonical) {
         return Ok(());
     }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
     }
+    updated.push_str(&canonical);
+    updated.push('\n');
+    write_registry(&path, &updated)
+}
 
-    // Append, ensuring a trailing newline.
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file)?;
+/// Take the registry's lock, so concurrent dwm processes don't lose each
+/// other's entries between reading the file and writing it back.
+fn lock_registry(path: &Path) -> Result<fs::File> {
+    let dir = path.parent().context("registry path has no directory")?;
+    fs::create_dir_all(dir)?;
+    let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = dir.join(lock_name);
+    let file =
+        fs::File::create(&lock_path).with_context(|| format!("opening {}", lock_path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", lock_path.display()))?;
+    Ok(file)
+}
+
+fn read_registry(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(c) => Ok(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
     }
-    writeln!(file, "{}", canonical)?;
+}
+
+/// Replace the registry in one step, so a reader never sees it half written.
+fn write_registry(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
@@ -208,11 +231,11 @@ fn register_repo(repo_root: &Path) -> Result<()> {
 /// return them.
 fn read_and_prune_registry() -> Result<Vec<PathBuf>> {
     let path = registry_path()?;
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let _lock = lock_registry(&path)?;
+    let content = read_registry(&path)?;
 
     let mut survivors = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -237,14 +260,14 @@ fn read_and_prune_registry() -> Result<Vec<PathBuf>> {
     }
 
     if changed {
-        // Rewrite with surviving entries. Best-effort: ignore write errors,
-        // since concurrent writers may race with us.
+        // Best-effort: listing shouldn't fail because the cleanup couldn't
+        // be saved.
         let mut buf = String::new();
         for p in &survivors {
             buf.push_str(&p.to_string_lossy());
             buf.push('\n');
         }
-        let _ = fs::write(&path, buf);
+        let _ = write_registry(&path, &buf);
     }
 
     Ok(survivors)
@@ -408,13 +431,29 @@ fn create_workspace(
         &source,
         &config.workspace,
     )?;
-    seed.apply(&ws_path, deps.backend.vcs_type(), &config.workspace)
-        .with_context(|| {
-            format!(
-                "workspace created at {} but file copying failed; setup was not run",
+    if let Err(e) = seed.apply(&ws_path, deps.backend.vcs_type(), &config.workspace) {
+        // The workspace is seconds old and holds nothing but what was just
+        // copied, so take it away again rather than leave a half-made one that
+        // blocks retrying under the same name.
+        let cleanup = deps
+            .backend
+            .discard_new_workspace(&root, ws_name.as_str(), &ws_path)
+            .and_then(|()| {
+                if ws_path.exists() {
+                    fs::remove_dir_all(&ws_path)?;
+                }
+                Ok(())
+            });
+        return Err(match cleanup {
+            Ok(()) => e.context(format!(
+                "copying files into workspace '{ws_name}' failed, so it was removed again; setup was not run"
+            )),
+            Err(c) => e.context(format!(
+                "copying files into {} failed, and removing the partial workspace also failed ({c:#}); it is still there",
                 ws_path.display()
-            )
-        })?;
+            )),
+        });
+    }
     eprintln!(
         "{} workspace '{}' created at {}",
         "✓".green(),
@@ -2035,6 +2074,35 @@ mod tests {
     }
 
     #[test]
+    fn registry_keeps_every_entry_under_concurrent_updates() {
+        // Regression: appends and the prune rewrite weren't serialised, so a
+        // `dwm list --all` racing a `dwm new` could drop the new repo.
+        let tmp = tempfile::tempdir().unwrap();
+        let repos: Vec<PathBuf> = (0..16)
+            .map(|i| {
+                let repo = make_fake_repo(&tmp.path().join(format!("r{i}")), ".jj");
+                fs::create_dir_all(dwm_dir(&repo)).unwrap();
+                repo
+            })
+            .collect();
+
+        with_data_dir(tmp.path(), || {
+            std::thread::scope(|s| {
+                for repo in &repos {
+                    s.spawn(move || register_repo(repo).unwrap());
+                    s.spawn(|| read_and_prune_registry().unwrap());
+                }
+            });
+            let mut entries = read_and_prune_registry().unwrap();
+            entries.sort();
+            let mut want: Vec<PathBuf> =
+                repos.iter().map(|r| fs::canonicalize(r).unwrap()).collect();
+            want.sort();
+            assert_eq!(entries, want);
+        });
+    }
+
+    #[test]
     fn registry_prunes_missing_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let alive = make_fake_repo(tmp.path(), ".jj");
@@ -3501,6 +3569,62 @@ mod tests {
     }
 
     // ── E2E tests with real git repos ───────────────────────────────
+
+    #[test]
+    fn e2e_failed_copy_removes_the_new_workspace() {
+        // Regression: when copying failed after the worktree was created, dwm
+        // left it behind, and retrying `dwm new` with the name then failed.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command.current_dir(&root).args(args);
+            String::from_utf8(crate::seed::output(command).unwrap()).unwrap()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "dwm"]);
+        run(&["config", "user.email", "dwm@example.com"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        // `cache/` is ignored here, but not at the commit the workspace gets.
+        fs::write(root.join(".gitignore"), "cache/\n").unwrap();
+        fs::create_dir(root.join("cache")).unwrap();
+        fs::write(root.join("cache/value"), "x").unwrap();
+        fs::write(
+            root.join(".dwm.toml"),
+            "[workspace]\ncopy = ['cache']\ncopy_unignored = 'error'\n",
+        )
+        .unwrap();
+        let deps = WorkspaceDeps {
+            backend: vcs::VcsType::Git.to_backend(),
+            cwd: root.clone(),
+            rex: None,
+        };
+        let new = |name: &str| {
+            with_data_dir(tmp.path(), || {
+                new_workspace_inner(&deps, Some(name.into()), None, None, Placement::Here, &[])
+            })
+        };
+
+        let err = new("one").unwrap_err();
+        assert!(format!("{err:#}").contains("removed again"), "{err:#}");
+        let ws = worktrees_dir(&root).join("one");
+        assert!(!ws.exists(), "the half-made workspace is gone");
+        let listed = run(&["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains("/one\n"), "{listed}");
+        let branches = run(&["branch", "--list", "one"]);
+        assert!(branches.trim().is_empty(), "branch left behind: {branches}");
+
+        // With the problem fixed, the same name works.
+        fs::write(
+            root.join(".dwm.toml"),
+            "[workspace]\ncopy = ['cache']\ncopy_unignored = 'skip'\n",
+        )
+        .unwrap();
+        new("one").unwrap();
+        assert!(ws.exists());
+    }
 
     #[test]
     fn e2e_configured_copy_runs_before_setup_and_from_uses_source() {
