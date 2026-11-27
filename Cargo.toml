@@ -2,6 +2,7 @@
 name = "dwm"
 version = "2.2.0"
 edition = "2024"
+license = "MIT"
 repository = "https://github.com/drivasperez/dwm"
 description = "A git/jj worktree manager"
 homepage = "dwm.drpz.xyz"
