@@ -394,9 +394,8 @@ impl VcsBackend for JjBackend {
         _old_name: &str,
         new_name: &str,
     ) -> Result<()> {
-        // Update stale working copy before rename (common when workspace hasn't been used recently)
-        let _ = run_jj_in(old_path, &["workspace", "update-stale"]);
-        // jj workspace rename updates VCS metadata (run inside the workspace dir)
+        // Let jj refuse stale working copies. Running update-stale here can
+        // overwrite on-disk edits before the user has a chance to save them.
         run_jj_in(old_path, &["workspace", "rename", new_name])?;
         // Then move the directory
         std::fs::rename(old_path, new_path)?;

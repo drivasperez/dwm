@@ -4450,7 +4450,7 @@ mod tests {
     }
 
     #[test]
-    fn e2e_jj_rename_stale_workspace() {
+    fn e2e_jj_rename_refuses_stale_workspace_without_touching_edits() {
         assert!(jj_available(), "jj must be installed to run this test");
         let tmp = tempfile::tempdir().unwrap();
         let repo_path = tmp.path().join("repos/myrepo");
@@ -4473,31 +4473,39 @@ mod tests {
             )
             .unwrap();
 
-            let main_str = main_repo.to_str().unwrap();
-            fs::write(main_repo.join("file.txt"), "content\n").unwrap();
-            std::process::Command::new("jj")
-                .args(["--repository", main_str, "describe", "-m", "advance op log"])
-                .output()
-                .unwrap();
+            let worktrees = worktrees_dir(&main_repo);
+            let old_path = worktrees.join("my-ws");
+            run_ok(&old_path, "jj", &["status"]);
 
-            let deps2 = WorkspaceDeps {
-                backend: Box::new(crate::jj::JjBackend),
-                cwd: main_repo.clone(),
-                rex: None,
-            };
-            rename_workspace_inner(&deps2, "my-ws", "renamed-ws").unwrap();
+            // Rewrite the secondary workspace's working-copy commit from the
+            // main workspace. Advancing the operation log alone isn't stale.
+            fs::write(main_repo.join("upstream.txt"), "upstream\n").unwrap();
+            run_ok(&main_repo, "jj", &["commit", "-m", "upstream change"]);
+            run_ok(&main_repo, "jj", &["rebase", "-r", "my-ws@", "-d", "@-"]);
+            fs::write(old_path.join("unsnapshotted.txt"), "keep me\n").unwrap();
 
-            assert!(!worktrees_dir(&main_repo).join("my-ws").exists());
-            assert!(worktrees_dir(&main_repo).join("renamed-ws").exists());
-
-            let deps3 = WorkspaceDeps {
-                backend: Box::new(crate::jj::JjBackend),
-                cwd: main_repo,
-                rex: None,
-            };
-            let entries = list_workspace_entries_inner(&deps3).unwrap();
-            assert!(entries.iter().any(|e| e.name == "renamed-ws"));
-            assert!(!entries.iter().any(|e| e.name == "my-ws"));
+            let err = rename_workspace_inner(&deps, "my-ws", "renamed-ws").unwrap_err();
+            assert!(err.to_string().contains("working copy is stale"), "{err:#}");
+            assert!(old_path.is_dir());
+            assert!(!worktrees.join("renamed-ws").exists());
+            assert!(!old_path.join("upstream.txt").exists());
+            assert_eq!(
+                fs::read_to_string(old_path.join("unsnapshotted.txt")).unwrap(),
+                "keep me\n"
+            );
+            let listed = run_ok(
+                &main_repo,
+                "jj",
+                &[
+                    "--ignore-working-copy",
+                    "workspace",
+                    "list",
+                    "-T",
+                    "name ++ \"\\n\"",
+                ],
+            );
+            assert!(listed.lines().any(|name| name == "my-ws"), "{listed}");
+            assert!(!listed.lines().any(|name| name == "renamed-ws"), "{listed}");
         });
     }
 

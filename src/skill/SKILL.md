@@ -54,4 +54,6 @@ Use this to see which workspaces are busy before acting on one.
 
 ## Other commands
 
+`dwm rename` refuses stale jj workspaces. Leave them alone rather than running `jj workspace update-stale` on someone else's work.
+
 `dwm new <name>` creates a workspace with a name of your choosing, and `dwm delete <name>` removes one; prefer leasing for task work. `dwm prune` lists workspaces whose work is safe to discard and `dwm prune --yes` deletes them; it never deletes leased workspaces, or, inside Rex, ones open in a pane. Don't run `dwm list`, which is an interactive picker for people.

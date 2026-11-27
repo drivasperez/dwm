@@ -68,6 +68,8 @@ Workspace and pool names are single names, not paths. Leading dots are allowed (
 
 `dwm prune` cleans up finished workspaces. It never touches the main workspace, and treats a workspace as prunable only when deleting it loses nothing: for jj, it snapshots the workspace (`jj status`) and then requires that every non-empty commit in `trunk()..<ws>@` is reachable from a remote bookmark, so uncommitted edits and local-only commits both keep it. A stale workspace, or one reporting a sibling operation, is kept rather than repaired with `jj workspace update-stale`, which can overwrite on-disk edits. For git, the worktree needs a clean `git status` (untracked files count, ignored files don't) and no commits that are on neither trunk nor any remote branch. Without `--yes` it only prints each workspace's verdict and reason; with it, prunable workspaces go through the same path as `dwm delete`.
 
+`dwm rename` refuses to rename a stale jj workspace rather than updating it automatically. Save any on-disk edits before updating the workspace yourself and retrying.
+
 The `Changes` column in `dwm list` and `dwm status` is each workspace's own diff, measured from the point it branched off trunk — a workspace that simply hasn't been rebased is not reported as containing everything that has since landed on trunk.
 
 ## Workspace pools
