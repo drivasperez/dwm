@@ -1,5 +1,58 @@
 use rand::seq::IndexedRandom;
-use std::path::Path;
+use std::{fmt, path::Path};
+
+/// A single workspace directory name, never a path.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct WorkspaceName(String);
+
+impl WorkspaceName {
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        name.parse()
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WorkspaceName {
+    type Error = anyhow::Error;
+
+    fn try_from(name: String) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !name.is_empty()
+                && !matches!(name.as_str(), "." | "..")
+                && !name.contains(['/', '\\', '\0'])
+                && matches!(
+                    Path::new(&name).components().next(),
+                    Some(std::path::Component::Normal(_))
+                ),
+            "invalid workspace name {name:?}"
+        );
+        Ok(Self(name))
+    }
+}
+
+impl std::str::FromStr for WorkspaceName {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> anyhow::Result<Self> {
+        Self::try_from(name.to_owned())
+    }
+}
+
+impl AsRef<Path> for WorkspaceName {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl fmt::Display for WorkspaceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 const ADJECTIVES: &[&str] = &[
     "amber", "bold", "calm", "dark", "eager", "fair", "glad", "hazy", "icy", "jade", "keen",
@@ -39,6 +92,16 @@ pub fn generate_unique(dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_names_are_single_components() {
+        for raw in [".hidden", "with spaces", "feature-1"] {
+            assert_eq!(WorkspaceName::parse(raw).unwrap().as_str(), raw);
+        }
+        for raw in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+            assert!(WorkspaceName::parse(raw).is_err(), "{raw:?}");
+        }
+    }
 
     #[test]
     fn name_has_adjective_dash_noun_format() {

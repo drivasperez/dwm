@@ -365,7 +365,7 @@ pub fn remove_agent_statuses_for_workspace(repo_dir: &Path, workspace: &str) {
 fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
     // Case 1: cwd is inside a dwm workspace under <root>.dwm/worktrees/<ws>/...
     if let Some((root, ws_name, _ws_path)) = workspace::find_dwm_workspace(cwd) {
-        return Some((workspace::dwm_dir(&root), ws_name));
+        return Some((workspace::dwm_dir(&root), ws_name.to_string()));
     }
 
     // Case 2: cwd is somewhere inside a repo root that has a sibling
@@ -402,7 +402,7 @@ fn resolve_workspace_from_cwd(cwd: &Path) -> Option<(PathBuf, String)> {
 /// directories in every repo an agent runs in.
 fn resolve_workspace_for_status(cwd: &Path) -> Option<(PathBuf, String)> {
     if let Some((root, ws_name, _)) = workspace::find_dwm_workspace(cwd) {
-        return Some((workspace::dwm_dir(&root), ws_name));
+        return Some((workspace::dwm_dir(&root), ws_name.to_string()));
     }
     let mut current = cwd.to_path_buf();
     loop {

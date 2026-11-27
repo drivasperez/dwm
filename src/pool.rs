@@ -13,12 +13,12 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::rex::Pane;
+use crate::{names::WorkspaceName, rex::Pane};
 
 /// One workspace on loan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lease {
-    pub workspace: String,
+    pub workspace: WorkspaceName,
     /// Seconds since the Unix epoch.
     pub leased_at: u64,
     /// The Rex pane that took the lease, whose closing ends it.
@@ -27,9 +27,9 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub fn new(workspace: &str, rex_block: Option<&str>) -> Self {
+    pub fn new(workspace: &WorkspaceName, rex_block: Option<&str>) -> Self {
         Self {
-            workspace: workspace.to_string(),
+            workspace: workspace.clone(),
             leased_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -64,7 +64,7 @@ fn leases_dir(dwm: &Path) -> PathBuf {
     dwm.join("leases")
 }
 
-fn lease_path(dwm: &Path, workspace: &str) -> PathBuf {
+fn lease_path(dwm: &Path, workspace: &WorkspaceName) -> PathBuf {
     leases_dir(dwm).join(format!("{workspace}.json"))
 }
 
@@ -85,7 +85,7 @@ pub fn lock(dwm: &Path) -> Result<PoolLock> {
 }
 
 /// The lease on `workspace`, if there is a readable one.
-pub fn read_lease(dwm: &Path, workspace: &str) -> Option<Lease> {
+pub fn read_lease(dwm: &Path, workspace: &WorkspaceName) -> Option<Lease> {
     let text = fs::read_to_string(lease_path(dwm, workspace)).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -101,7 +101,7 @@ pub fn write_lease(dwm: &Path, lease: &Lease) -> Result<()> {
 }
 
 /// Remove the lease on `workspace`. Returns whether there was one.
-pub fn remove_lease(dwm: &Path, workspace: &str) -> Result<bool> {
+pub fn remove_lease(dwm: &Path, workspace: &WorkspaceName) -> Result<bool> {
     match fs::remove_file(lease_path(dwm, workspace)) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -110,9 +110,9 @@ pub fn remove_lease(dwm: &Path, workspace: &str) -> Result<bool> {
 }
 
 /// Move a lease along with a renamed workspace.
-pub fn rename_lease(dwm: &Path, old: &str, new: &str) -> Result<()> {
+pub fn rename_lease(dwm: &Path, old: &WorkspaceName, new: &WorkspaceName) -> Result<()> {
     if let Some(mut lease) = read_lease(dwm, old) {
-        lease.workspace = new.to_string();
+        lease.workspace = new.clone();
         write_lease(dwm, &lease)?;
         remove_lease(dwm, old)?;
     }
@@ -133,25 +133,41 @@ pub fn member_number(pool: &str, name: &str) -> Option<u32> {
 }
 
 /// The members of `pool` among `names`, in number order.
-pub fn members<'a>(pool: &str, names: impl IntoIterator<Item = &'a str>) -> Vec<(u32, String)> {
-    let mut out: Vec<(u32, String)> = names
+pub fn members(
+    pool: &WorkspaceName,
+    names: impl IntoIterator<Item = WorkspaceName>,
+) -> Vec<(u32, WorkspaceName)> {
+    let mut out: Vec<_> = names
         .into_iter()
-        .filter_map(|n| member_number(pool, n).map(|i| (i, n.to_string())))
+        .filter_map(|n| member_number(pool.as_str(), n.as_str()).map(|i| (i, n)))
         .collect();
     out.sort();
     out
 }
 
 /// The name for a new member: one past the highest number in use.
-pub fn next_member_name(pool: &str, members: &[(u32, String)]) -> String {
-    let next = members.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
-    format!("{pool}-{next}")
+pub fn next_member_name(
+    pool: &WorkspaceName,
+    members: &[(u32, WorkspaceName)],
+) -> anyhow::Result<WorkspaceName> {
+    let next = members
+        .iter()
+        .map(|(n, _)| *n)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .with_context(|| format!("pool {pool} has exhausted its member numbers"))?;
+    WorkspaceName::try_from(format!("{pool}-{next}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rex::tests::pane;
+
+    fn ws(name: &str) -> WorkspaceName {
+        WorkspaceName::parse(name).unwrap()
+    }
 
     #[test]
     fn member_number_parses_pool_suffixes() {
@@ -171,22 +187,24 @@ mod tests {
     #[test]
     fn members_sort_numerically_and_next_name_follows_the_highest() {
         let names = ["agents-10", "other-1", "agents-2", "agents-1", "agents"];
-        let m = members("agents", names);
+        let pool = ws("agents");
+        let m = members(&pool, names.map(ws));
         assert_eq!(
             m,
             vec![
-                (1, "agents-1".to_string()),
-                (2, "agents-2".to_string()),
-                (10, "agents-10".to_string())
+                (1, ws("agents-1")),
+                (2, ws("agents-2")),
+                (10, ws("agents-10"))
             ]
         );
-        assert_eq!(next_member_name("agents", &m), "agents-11");
-        assert_eq!(next_member_name("agents", &[]), "agents-1");
+        assert_eq!(next_member_name(&pool, &m).unwrap(), ws("agents-11"));
+        assert_eq!(next_member_name(&pool, &[]).unwrap(), ws("agents-1"));
+        assert!(next_member_name(&pool, &[(u32::MAX, ws("agents-4294967295"))]).is_err());
     }
 
     #[test]
     fn lease_ends_when_its_rex_pane_closes() {
-        let lease = Lease::new("agents-1", Some("block:a"));
+        let lease = Lease::new(&ws("agents-1"), Some("block:a"));
         let open = [pane("block:a", "s", Path::new("/x"), &[])];
         let other = [pane("block:b", "s", Path::new("/x"), &[])];
         assert_eq!(lease_state(&lease, Some(&open)), LeaseState::Held);
@@ -197,7 +215,7 @@ mod tests {
 
     #[test]
     fn lease_without_a_pane_holds_until_released() {
-        let lease = Lease::new("agents-1", None);
+        let lease = Lease::new(&ws("agents-1"), None);
         assert_eq!(lease_state(&lease, Some(&[])), LeaseState::Held);
     }
 
@@ -205,22 +223,23 @@ mod tests {
     fn lease_files_round_trip_rename_and_remove() {
         let tmp = tempfile::tempdir().unwrap();
         let dwm = tmp.path();
-        assert_eq!(read_lease(dwm, "a-1"), None);
-        let lease = Lease::new("a-1", Some("block:x"));
+        let (a, b) = (ws("a-1"), ws("b-1"));
+        assert_eq!(read_lease(dwm, &a), None);
+        let lease = Lease::new(&a, Some("block:x"));
         write_lease(dwm, &lease).unwrap();
-        assert_eq!(read_lease(dwm, "a-1"), Some(lease.clone()));
+        assert_eq!(read_lease(dwm, &a), Some(lease.clone()));
 
-        rename_lease(dwm, "a-1", "b-1").unwrap();
-        assert_eq!(read_lease(dwm, "a-1"), None);
-        assert_eq!(read_lease(dwm, "b-1").unwrap().workspace, "b-1");
+        rename_lease(dwm, &a, &b).unwrap();
+        assert_eq!(read_lease(dwm, &a), None);
+        assert_eq!(read_lease(dwm, &b).unwrap().workspace, b);
 
-        assert!(remove_lease(dwm, "b-1").unwrap());
-        assert!(!remove_lease(dwm, "b-1").unwrap());
+        assert!(remove_lease(dwm, &b).unwrap());
+        assert!(!remove_lease(dwm, &b).unwrap());
     }
 
     #[test]
     fn lease_without_block_omits_the_field() {
-        let json = serde_json::to_string(&Lease::new("a-1", None)).unwrap();
+        let json = serde_json::to_string(&Lease::new(&ws("a-1"), None)).unwrap();
         assert!(!json.contains("rex_block"), "{json}");
         let back: Lease = serde_json::from_str(r#"{"workspace":"a-1","leased_at":5}"#).unwrap();
         assert_eq!(back.rex_block, None);
