@@ -636,7 +636,7 @@ fn rex_config_file() -> Option<PathBuf> {
     Some(base.join("rex").join("init.lua"))
 }
 
-/// Render `dwm.lua`, the module that adds dwm's command palette action.
+/// Render `dwm.lua`, the module that adds dwm's command palette actions.
 ///
 /// Programs Rex starts get the server's minimal PATH rather than the one a
 /// login shell sets up, so the module runs dwm and rex by absolute path and
@@ -703,7 +703,7 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// Offer to add dwm's workspace picker to Rex's command palette.
+/// Offer to add dwm's workspace actions to Rex's command palette.
 pub fn setup_palette_interactive() -> Result<()> {
     use owo_colors::OwoColorize;
 
@@ -745,7 +745,7 @@ pub fn setup_palette_interactive() -> Result<()> {
             reload_config(&rex);
         }
         eprintln!(
-            "  {} Command palette action installed in {}",
+            "  {} Command palette actions installed in {}",
             "✓".green(),
             display.dimmed()
         );
@@ -753,7 +753,7 @@ pub fn setup_palette_interactive() -> Result<()> {
     }
 
     eprint!(
-        "  {} Add a \"dwm: Switch Workspace\" action to Rex's command palette ({})? [y/N] ",
+        "  {} Add dwm's workspace actions to Rex's command palette ({})? [y/N] ",
         "?".bold().cyan(),
         display.bold()
     );
@@ -766,7 +766,7 @@ pub fn setup_palette_interactive() -> Result<()> {
     std::fs::write(&init_path, add_require_line(&init))?;
     reload_config(&rex);
     eprintln!(
-        "  {} Installed; find it in the command palette, or bind it with {}",
+        "  {} Installed; find the actions in the command palette, or bind Switch with {}",
         "✓".green(),
         r#"rex.bind("cmd+shift+w", "dwm_switch")"#.bold()
     );

@@ -223,9 +223,15 @@ Switching the Rex app to another session needs Remote Control, in Rex's Settings
 
 `dwm new` and `dwm prune --yes` report their progress on the Rex tab they run in.
 
-`dwm setup` offers to add a "dwm: Switch Workspace…" action to Rex's command palette. It writes `dwm.lua` next to Rex's `init.lua` (with the paths to `dwm` and `rex` and your shell's `PATH`, since programs Rex starts get a minimal one) and adds `require("dwm")` to `init.lua`. The action lists the workspaces of the focused pane's repo, or of every repo, and focuses or opens a session for the one you pick. Bind it to a key in `init.lua` with `rex.bind("cmd+shift+w", "dwm_switch")`. Run `dwm setup` again after moving dwm to update the paths.
+`dwm setup` offers to install these Rex command palette actions in `dwm.lua` next to Rex's `init.lua`:
 
-Set `DWM_REX=0` to turn all of this off.
+- **dwm: Switch Workspace…** (`dwm_switch`) focuses or opens a workspace session.
+- **dwm: New Workspace…** (`dwm_new`) creates a workspace and opens a session in it. Leave the name blank for a generated name, and the shell command blank for a plain shell.
+- **dwm: Prune Workspaces…** (`dwm_prune`) previews cleanup in a floating terminal and asks before deleting anything. It uses the normal prune checks and keeps workspaces open in Rex; close their panes first if you want to prune them.
+
+New and Prune use the focused terminal's repository or ask you to pick a registered repo. New and the repository picker require a Rex version that supports palette prompts. Bind an action in `init.lua`, for example `rex.bind("cmd+shift+w", "dwm_switch")`. Run `dwm setup` again to update an existing integration.
+
+Set `DWM_REX=0` to turn off Rex integration for CLI invocations.
 
 ## Build
 
@@ -233,4 +239,5 @@ Set `DWM_REX=0` to turn all of this off.
 cargo build
 cargo t          # run tests (uses cargo-nextest)
 cargo clippy     # lint
+lua src/rex/palette_test.lua  # Rex palette tests (no running Rex server needed)
 ```
